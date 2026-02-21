@@ -10,4 +10,9 @@
 // add headers that you want to pre-compile here
 #include "framework.h"
 
+
+#pragma warning(push, 0)
+#include ".\CppSDK\SDK.hpp"
+#pragma warning(pop)
+
 #endif //PCH_H

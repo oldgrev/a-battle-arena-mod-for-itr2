@@ -1,15 +1,12 @@
 name: MSBuild
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   release:
     types: [published]
 
 jobs:
   build:
+    if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: windows-latest
     permissions:
       contents: read

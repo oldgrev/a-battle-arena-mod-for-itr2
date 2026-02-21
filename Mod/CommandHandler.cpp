@@ -60,6 +60,13 @@ namespace Mod
         std::string commandLower = command;
         std::transform(commandLower.begin(), commandLower.end(), commandLower.begin(), ::tolower);
 
+        // When the mod is running in the main menu / map load, UWorld can be null.
+        // Still respond to TCP clients so it doesn't look "dead".
+        if (!world && commandLower != "help")
+        {
+            return "World not ready yet (still loading / in menu). Try again once you're in a level. (Use: help)";
+        }
+
         // Build args vector (everything after the command)
         std::vector<std::string> args(tokens.begin() + 1, tokens.end());
 

@@ -3,6 +3,7 @@
 #include "TcpServer.hpp"
 
 #include <cctype>
+#include <future>
 #include <iostream>
 #include <vector>
 
@@ -158,9 +159,31 @@ namespace Mod
         }
 
         queue_ = queue;
+
+        // Start the server thread but wait for it to actually bind/listen so callers can
+        // reliably log success and clients don't connect to a dead port.
         running_.store(true);
-        thread_ = std::thread([this, port]()
-                              { Run(port); });
+        auto readyPromise = std::make_shared<std::promise<bool>>();
+        std::future<bool> readyFuture = readyPromise->get_future();
+
+        thread_ = std::thread([this, port, readyPromise]()
+            {
+                Run(port, readyPromise);
+            });
+
+        // Wait up to 2 seconds for bind/listen.
+        if (readyFuture.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
+        {
+            return false;
+        }
+
+        bool ok = false;
+        try { ok = readyFuture.get(); } catch (...) { ok = false; }
+        if (!ok)
+        {
+            Stop();
+            return false;
+        }
         return true;
     }
 
@@ -184,13 +207,14 @@ namespace Mod
         return running_.load();
     }
 
-    void TcpServer::Run(uint16_t port)
+    void TcpServer::Run(uint16_t port, std::shared_ptr<std::promise<bool>> ready)
     {
         WSADATA wsaData{};
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
         {
             std::cout << "[tcp] WSAStartup failed.\n";
             running_.store(false);
+			if (ready) ready->set_value(false);
             return;
         }
 
@@ -200,11 +224,14 @@ namespace Mod
             std::cout << "[tcp] Failed to create socket.\n";
             WSACleanup();
             running_.store(false);
+			if (ready) ready->set_value(false);
             return;
         }
 
-        BOOL reuseAddr = TRUE;
-        setsockopt(listenSocket_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&reuseAddr), sizeof(reuseAddr));
+		// IMPORTANT: don't allow multiple processes to bind the same port.
+		// SO_EXCLUSIVEADDRUSE prevents the "two servers bind 7777" situation on Windows.
+		BOOL exclusive = TRUE;
+		setsockopt(listenSocket_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
 
         sockaddr_in service{};
         service.sin_family = AF_INET;
@@ -217,6 +244,7 @@ namespace Mod
             CloseSocket(listenSocket_);
             WSACleanup();
             running_.store(false);
+			if (ready) ready->set_value(false);
             return;
         }
 
@@ -226,10 +254,12 @@ namespace Mod
             CloseSocket(listenSocket_);
             WSACleanup();
             running_.store(false);
+			if (ready) ready->set_value(false);
             return;
         }
 
         std::cout << "[tcp] Listening on port " << port << ".\n";
+		if (ready) ready->set_value(true);
 
         while (running_.load())
         {

@@ -11,6 +11,21 @@
 // - TArray is a container object. Access members with '.', not '->' (e.g. LocalPlayers.Num(), not LocalPlayers->Num()).
 // - Level Change: SDK::UWorld does not have GetPackage() in this generator version. Use world->GetName() for stable level-change detection.
 // - Level Change: When a level changes, cached pointers (like the player character) become invalid. Always clear caches (e.g., GameContext::ClearCache()) on level change to prevent silent failures in systems like ModFeedback.
+// - Hook Retry Condition: Do NOT gate the ProcessEvent hook retry on UWorld::GetWorld(). The world is null until the first map loads, but GObjects (and the VTables to patch) are populated well before that. Requiring 'world != null' caused the retry to silently never fire, especially in the split-DLL setup where the mod is loaded via LoadLibraryA early in process startup. Only check GObjects->Num() > 1000.
+// - DllMain MessageBoxA DEADLOCK: NEVER call MessageBoxA (or any window/UI function) from DllMain callbacks
+//   (DLL_THREAD_ATTACH, DLL_THREAD_DETACH, DLL_PROCESS_DETACH) or from functions called by the modloader
+//   while it still holds the loader lock (e.g. GetModSDKVersion). MessageBoxA runs a message pump which
+//   can deadlock against the loader lock.
+// - DisableThreadLibraryCalls: ALWAYS call DisableThreadLibraryCalls(hModule) in DLL_PROCESS_ATTACH in the
+//   mod's DllMain. Without it, DllMain fires for every thread the game creates with DLL_THREAD_ATTACH.
+//   Any non-trivial callback body will cause hangs or repeated popups for every game thread.
+// - Background thread AV / C2712: __try cannot be used in a function that has C++ objects requiring
+//   unwinding (e.g. CommandHandlerRegistry, CommandQueue, TcpServer in Run()). Extracting the SEH block
+//   into a plain helper function (no C++ objects, no destructors) fixes C2712. See SafeGetGObjectsNum().
+// - Split-DLL double-load breaks TCP commands: If the mod DLL is loaded twice in the same process, one
+//   instance can own the TCP server/CommandQueue while the other instance owns the ProcessEvent hook and
+//   tick loop. Symptom: telnet connects but commands get no responses. Fix: add a PID-scoped named mutex
+//   guard so only one ModMain thread runs per process, and log PID/TID + module path.
 //
 
 
@@ -19,6 +34,7 @@
 
 #include <chrono>
 #include <thread>
+#include <string>
 
 #include "Logging.hpp"
 #include "CommandQueue.hpp"
@@ -38,14 +54,39 @@ namespace Mod
     {
         constexpr uint16_t kDefaultPort = 7777;
 
+		static HANDLE gSingleInstanceMutex = nullptr;
+
         void InitializeLogging()
         {
             Mod::Logger::Get().Initialize();
             LOG_INFO("[mod] Log file: " << Mod::Logger::Get().GetPath());
         }
-    }
 
-    DWORD ModMain::Run(HMODULE moduleHandle)
+        static std::string GetThisModulePath(HMODULE hModule)
+        {
+            char dllPath[MAX_PATH] = {};
+            DWORD len = GetModuleFileNameA(hModule, dllPath, MAX_PATH);
+            if (len == 0 || len >= MAX_PATH)
+                return std::string();
+            return std::string(dllPath);
+        }
+
+        // Extracted into its own plain function because __try/__except cannot coexist with
+        // C++ object unwinding (C2712). Run() has destructible locals so __try is banned there.
+        // Returns the GObjects count, or -1 if a structured exception (e.g. AV) was caught.
+        static int SafeGetGObjectsNum()
+        {
+            __try
+            {
+                return SDK::UObject::GObjects->Num();
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return -1;
+            }
+        }
+    }
+   DWORD ModMain::Run(HMODULE moduleHandle)
     {
         (void)moduleHandle;
 
@@ -101,36 +142,39 @@ namespace Mod
 
         return 0;
     }
-
     void ModMain::OnTick(SDK::UWorld* world)
     {
-        if (!world) return;
+        // NOTE: world can be null in main menu / during loading.
+        // We still want to service TCP commands so clients get responses.
 
-        static std::string lastWorldName = "";
-        std::string currentWorldName = world->GetName();
-
-        if (lastWorldName != "" && currentWorldName != "" && lastWorldName != currentWorldName)
+        if (world)
         {
-            LOG_INFO("[mod] Level change detected from " << lastWorldName << " to " << currentWorldName);
-            
-            // Clear cached player/controller references
-            GameContext::ClearCache();
+            static std::string lastWorldName = "";
+            std::string currentWorldName = world->GetName();
 
-            // Deactivate cheats
-            Cheats* cheats = GetCheats();
-            if (cheats)
+            if (lastWorldName != "" && currentWorldName != "" && lastWorldName != currentWorldName)
             {
-                cheats->DeactivateAll();
-            }
+                LOG_INFO("[mod] Level change detected from " << lastWorldName << " to " << currentWorldName);
 
-            // Stop arena
-            auto* arena = Arena::ArenaSubsystem::Get();
-            if (arena)
-            {
-                arena->Stop();
+                // Clear cached player/controller references
+                GameContext::ClearCache();
+
+                // Deactivate cheats
+                Cheats* cheats = GetCheats();
+                if (cheats)
+                {
+                    cheats->DeactivateAll();
+                }
+
+                // Stop arena
+                auto* arena = Arena::ArenaSubsystem::Get();
+                if (arena)
+                {
+                    arena->Stop();
+                }
             }
+            lastWorldName = currentWorldName;
         }
-        lastWorldName = currentWorldName;
 
         // Get commands from TCP server
         auto* commandQueue = RuntimeState::GetCommandQueue();
@@ -152,18 +196,21 @@ namespace Mod
             }
         }
 
-        // Update cheats
-        Cheats* cheats = GetCheats();
-        if (cheats)
+        if (world)
         {
-            cheats->Update(world);
-        }
+            // Update cheats
+            Cheats* cheats = GetCheats();
+            if (cheats)
+            {
+                cheats->Update(world);
+            }
 
-        // Update Arena
-        auto* arena = Arena::ArenaSubsystem::Get();
-        if (arena)
-        {
-            arena->Update(world);
+            // Update Arena
+            auto* arena = Arena::ArenaSubsystem::Get();
+            if (arena)
+            {
+                arena->Update(world);
+            }
         }
     }
 }

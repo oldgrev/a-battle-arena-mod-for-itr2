@@ -798,11 +798,10 @@ namespace Mod
             {
                 if (lastTickTime.compare_exchange_strong(expected, nowMs))
                 {
-                    SDK::UWorld *world = SDK::UWorld::GetWorld();
-                    if (world)
-                    {
-                        ModMain::OnTick(world);
-                    }
+					SDK::UWorld *world = SDK::UWorld::GetWorld();
+					// Allow OnTick to run even if world is null (main menu / map loading)
+					// so TCP commands can still receive responses like `help`.
+					ModMain::OnTick(world);
                 }
             }
         }

@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <future>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -22,7 +24,7 @@ namespace Mod
         bool IsRunning() const;
 
     private:
-        void Run(uint16_t port);
+        void Run(uint16_t port, std::shared_ptr<std::promise<bool>> ready);
         void HandleClient(SOCKET clientSocket);
         static void CloseSocket(SOCKET &socket);
 

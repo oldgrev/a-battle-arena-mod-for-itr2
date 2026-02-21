@@ -44,6 +44,10 @@ namespace Mod::Arena
         void CheckWaveCompletion(SDK::UWorld* world);
         void ResetWaveStats();
 
+        // "Escape direction" is captured once at wave start from the player's view (flattened to XY).
+        // Any spawn/teleport/reposition candidates in that hemisphere are rejected.
+        bool IsInEscapeDirection(const SDK::FVector& playerLoc, const SDK::FVector& location) const;
+
         void LoadNPCList();
         void SaveNPCList();
         void ScanForNPCs(SDK::UWorld* world);
@@ -76,6 +80,9 @@ namespace Mod::Arena
         float lastPreSpawnTime_ = 0.0f;
         float waveStartTime_ = 0.0f;
         float lastProximityNoticeTime_ = 0.0f;
+
+        bool hasWaveEscapeForward_ = false;
+        SDK::FVector waveEscapeForward_{1.0f, 0.0f, 0.0f};
 
         struct EnemyState
         {

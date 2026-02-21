@@ -5,6 +5,7 @@ AILEARNINGS
 - Arena: Fixed major bug where StartWave failed to initialize enemiesToSpawn_, causing 0 enemies to spawn.
 - Arena: Updated StartWave to correctly calculate remaining spawns based on pre-spawned count from activeEnemies_.
 - Arena: Added safety sweep to prune invalid enemy refs before wave transitions/update to avoid crashes and log removals.
+- Arena: "Enemies behind player" was caused by (1) spawn/reposition being centered on the current player location with only LoS avoidance (behind is always "not in LoS"), and (2) anti-stuck teleport using `playerLoc + dir * distance` which overshot to the far side of the player. Fix: capture a wave-start "escape direction" and reject any spawn/reposition/teleport candidates in that hemisphere; fix anti-stuck to place at `playerLoc - dir * distance` (NPC-side of player).
 - Arena: NPC types are persisted to npcs.txt as full object paths to allow loading unloaded assets. File is preserved (no overwrite on empty/old-format) to retain historical discoveries across sessions.
 - Arena: Fixed spawning issue where NPCs could not be spawned unless already loaded in memory by implementing SoftClassPath loading logic in SpawnOneNPC.
 - Arena: SpawnOneNPC now builds paths via MakeSoftClassPath and loads with LoadClassAsset_Blocking for reliable Blueprint class loading from persisted paths.
@@ -91,6 +92,14 @@ namespace Mod::Arena
         SDK::FVector out = v;
         out.Z += dz;
         return out;
+    }
+
+    static SDK::FVector FlattenRotation(const SDK::FRotator& rot)
+    {
+        SDK::FRotator flat = rot;
+        flat.Pitch = 0.0f;
+        flat.Roll = 0.0f;
+        return SDK::UKismetMathLibrary::GetForwardVector(flat);
     }
 
     // Returns true if the location is likely visible in the player's current line-of-sight.
@@ -384,6 +393,29 @@ namespace Mod::Arena
         wavePending_ = false;
         isPreSpawning_ = false;
 
+        // Capture the player's "escape direction" once per wave, so we can prevent spawns/teleports
+        // from appearing on that side even if the player later turns around.
+        hasWaveEscapeForward_ = false;
+        {
+            SDK::FVector viewLoc{};
+            SDK::FRotator viewRot{};
+            if (Mod::GameContext::GetPlayerView(world, viewLoc, viewRot))
+            {
+                SDK::FVector forward = FlattenRotation(viewRot);
+                forward.Z = 0.0f;
+                const double lenSq = (double)forward.X * (double)forward.X + (double)forward.Y * (double)forward.Y;
+                if (lenSq > 1e-6)
+                {
+                    const double invLen = 1.0 / std::sqrt(lenSq);
+                    waveEscapeForward_.X = (float)((double)forward.X * invLen);
+                    waveEscapeForward_.Y = (float)((double)forward.Y * invLen);
+                    waveEscapeForward_.Z = 0.0f;
+                    hasWaveEscapeForward_ = true;
+                    LOG_INFO("[Arena] Wave escape direction captured: X=" << waveEscapeForward_.X << " Y=" << waveEscapeForward_.Y);
+                }
+            }
+        }
+
         // Defensive sweep to avoid stale pointers before we reuse pre-spawned enemies
         PruneInvalidEnemies(world);
 
@@ -424,6 +456,11 @@ namespace Mod::Arena
                         candidate.X += std::cos(angleRad) * dist;
                         candidate.Y += std::sin(angleRad) * dist;
                         candidate.Z = playerLoc.Z;
+
+                        if (IsInEscapeDirection(playerLoc, candidate))
+                        {
+                            continue;
+                        }
 
                         // Ground trace for final position.
                         SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + Mod::Tuning::kArenaGroundTraceUp };
@@ -552,6 +589,12 @@ namespace Mod::Arena
             targetLoc.X = playerLoc.X + offsetX;
             targetLoc.Y = playerLoc.Y + offsetY;
             targetLoc.Z = playerLoc.Z;
+
+            if (IsInEscapeDirection(playerLoc, targetLoc))
+            {
+                // Keep the wave pressure from one direction; never spawn into the wave's escape hemisphere.
+                continue;
+            }
 
             // Ground trace to ensure we aren't spawning in the void or deep underground
             SDK::FVector traceStart = { targetLoc.X, targetLoc.Y, targetLoc.Z + Mod::Tuning::kArenaGroundTraceUp };
@@ -901,7 +944,8 @@ namespace Mod::Arena
                         ? 0.0f
                         : (((attempt % 2) == 1) ? 1.0f : -1.0f) * Mod::Tuning::kArenaTeleportRetrySideStep * (float)((attempt + 1) / 2);
 
-                    SDK::FVector candidate = playerLoc + (dir * attemptDistance);
+                    // Place on the NPC-side of the player (between NPC and player direction), not past the player.
+                    SDK::FVector candidate = playerLoc - (dir * attemptDistance);
                     candidate.X += viewRight.X * sideAmount;
                     candidate.Y += viewRight.Y * sideAmount;
                     candidate.Z = playerLoc.Z;
@@ -920,6 +964,11 @@ namespace Mod::Arena
                     }
 
                     candidate.Z = hit.ImpactPoint.Z + Mod::Tuning::kArenaGroundSpawnZOffset;
+
+                    if (IsInEscapeDirection(playerLoc, candidate))
+                    {
+                        continue;
+                    }
 
                     if (IsLocationInPlayerLineOfSight(world, candidate))
                     {
@@ -1116,6 +1165,22 @@ namespace Mod::Arena
         std::ostringstream ss;
         ss << "Arena: Wave " << wave_ << " | Active: " << (active_.load() ? "Yes" : "No");
         return ss.str();
+    }
+
+    bool ArenaSubsystem::IsInEscapeDirection(const SDK::FVector& playerLoc, const SDK::FVector& location) const
+    {
+        if (!hasWaveEscapeForward_)
+        {
+            return false;
+        }
+
+        SDK::FVector to;
+        to.X = location.X - playerLoc.X;
+        to.Y = location.Y - playerLoc.Y;
+        to.Z = 0.0f;
+
+        const double dot = (double)to.X * (double)waveEscapeForward_.X + (double)to.Y * (double)waveEscapeForward_.Y;
+        return dot > 0.0;
     }
 }
 

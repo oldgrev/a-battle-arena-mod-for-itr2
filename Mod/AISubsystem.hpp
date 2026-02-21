@@ -5,7 +5,7 @@
 #include <functional>
 #include <memory>
 
-#include "..\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 
 namespace Mod
 {

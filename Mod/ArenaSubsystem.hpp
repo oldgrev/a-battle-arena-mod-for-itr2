@@ -6,7 +6,7 @@
 #include <mutex>
 #include <map>
 
-#include "..\\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 #include "AISubsystem.hpp"
 
 namespace Mod::Arena

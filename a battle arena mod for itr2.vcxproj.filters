@@ -13,6 +13,12 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Source Files\Mod">
+      <UniqueIdentifier>{928309ea-05a0-4476-b150-96a22526adb0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\SDK">
+      <UniqueIdentifier>{c26d4f51-1b8d-4dc3-b31c-e08316d6c749}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -21,13 +27,106 @@
     <ClInclude Include="pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Mod\AISubsystem.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\ArenaSubsystem.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\Cheats.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\CommandHandler.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\CommandQueue.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\GameContext.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\HookManager.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\ItemSubsystem.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\Logging.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\ModFeedback.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\ModMain.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\RuntimeState.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\TcpServer.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CppSDK\SDK.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="pch.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="Mod\AISubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\ArenaSubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\Cheats.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\CommandHandler.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\GameContext.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\HookManager.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\ItemSubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\ModFeedback.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\ModMain.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\RuntimeState.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\TcpServer.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\AIModule_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\Basic.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\BP_RadiusPlayerCharacter_Gameplay_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\CoreUObject_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\Engine_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\IntoTheRadius2_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

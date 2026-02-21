@@ -7,7 +7,7 @@
 // - Discovering subclasses via IsSubclassOf(BaseClass) will return true for the BaseClass itself. Ensure you check (cls != BaseClass) when searching for concrete types.
 // - UClass inherits from UStruct, which has a member 'SuperStruct'. You can use this to traverse the class hierarchy at runtime to find parent classes.
 
-#include "pch.h"
+
 
 #include "AISubsystem.hpp"
 
@@ -15,7 +15,7 @@
 #include <chrono>
 #include <thread>
 
-#include "..\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 #include "Logging.hpp"
 #include "HookManager.hpp"
 

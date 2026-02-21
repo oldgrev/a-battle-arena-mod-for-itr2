@@ -1,6 +1,6 @@
 #pragma once
 
-#include "..\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 
 namespace Mod::ModFeedback
 {

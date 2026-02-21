@@ -23,7 +23,7 @@
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{11e3099d-9e17-46f5-bbf5-6e3fe2682630}</ProjectGuid>
     <RootNamespace>abattlearenamodforitr2</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -70,6 +70,18 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <TargetName>battlearena</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <TargetName>battlearena</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <TargetName>battlearena</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <TargetName>battlearena</TargetName>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -112,10 +124,10 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;ABATTLEARENAMODFORITR2_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ForcedIncludeFiles>$(MSBuildProjectDirectory)\pch.h</ForcedIncludeFiles>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -131,10 +143,10 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;ABATTLEARENAMODFORITR2_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ForcedIncludeFiles>$(MSBuildProjectDirectory)\pch.h</ForcedIncludeFiles>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -143,17 +155,43 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="CppSDK\SDK.hpp" />
     <ClInclude Include="framework.h" />
+    <ClInclude Include="Mod\AISubsystem.hpp" />
+    <ClInclude Include="Mod\ArenaSubsystem.hpp" />
+    <ClInclude Include="Mod\Cheats.hpp" />
+    <ClInclude Include="Mod\CommandHandler.hpp" />
+    <ClInclude Include="Mod\CommandQueue.hpp" />
+    <ClInclude Include="Mod\GameContext.hpp" />
+    <ClInclude Include="Mod\HookManager.hpp" />
+    <ClInclude Include="Mod\ItemSubsystem.hpp" />
+    <ClInclude Include="Mod\Logging.hpp" />
+    <ClInclude Include="Mod\ModFeedback.hpp" />
+    <ClInclude Include="Mod\ModMain.hpp" />
+    <ClInclude Include="Mod\RuntimeState.hpp" />
+    <ClInclude Include="Mod\TcpServer.hpp" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="CppSDK\SDK\AIModule_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\Basic.cpp" />
+    <ClCompile Include="CppSDK\SDK\BP_RadiusPlayerCharacter_Gameplay_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\CoreUObject_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\Engine_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\IntoTheRadius2_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp" />
     <ClCompile Include="dllmain.cpp" />
-    <ClCompile Include="pch.cpp">
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
-    </ClCompile>
+    <ClCompile Include="Mod\AISubsystem.cpp" />
+    <ClCompile Include="Mod\ArenaSubsystem.cpp" />
+    <ClCompile Include="Mod\Cheats.cpp" />
+    <ClCompile Include="Mod\CommandHandler.cpp" />
+    <ClCompile Include="Mod\GameContext.cpp" />
+    <ClCompile Include="Mod\HookManager.cpp" />
+    <ClCompile Include="Mod\ItemSubsystem.cpp" />
+    <ClCompile Include="Mod\ModFeedback.cpp" />
+    <ClCompile Include="Mod\ModMain.cpp" />
+    <ClCompile Include="Mod\RuntimeState.cpp" />
+    <ClCompile Include="Mod\TcpServer.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

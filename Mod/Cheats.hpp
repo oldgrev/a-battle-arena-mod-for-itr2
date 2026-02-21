@@ -3,7 +3,7 @@
 #include <string>
 #include <atomic>
 
-#include "..\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 
 namespace Mod
 {

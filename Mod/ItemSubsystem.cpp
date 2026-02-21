@@ -1,4 +1,4 @@
-#include "pch.h"
+
 
 #include "ItemSubsystem.hpp"
 
@@ -6,7 +6,7 @@
 #include <chrono>
 #include <thread>
 
-#include "..\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 #include "Logging.hpp"
 
 namespace Mod

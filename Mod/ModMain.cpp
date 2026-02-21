@@ -13,7 +13,7 @@
 // - Level Change: When a level changes, cached pointers (like the player character) become invalid. Always clear caches (e.g., GameContext::ClearCache()) on level change to prevent silent failures in systems like ModFeedback.
 //
 
-#include "pch.h"
+
 
 #include "ModMain.hpp"
 
@@ -29,12 +29,7 @@
 #include "RuntimeState.hpp"
 #include "ArenaSubsystem.hpp"
 #include "GameContext.hpp"
-#include "..\SDK.hpp"
-
-extern "C" __declspec(dllexport) const char* GetModSDKVersion()
-{
-    return "1.0.0";
-}
+#include "..\CppSDK\SDK.hpp"
 
 
 namespace Mod

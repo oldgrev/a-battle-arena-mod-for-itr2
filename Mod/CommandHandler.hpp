@@ -6,7 +6,7 @@
 #include <functional>
 #include <map>
 
-#include "..\SDK.hpp"
+#include "..\CppSDK\SDK.hpp"
 #include "AISubsystem.hpp"
 #include "ArenaSubsystem.hpp"
 #include "ItemSubsystem.hpp"

@@ -1,0 +1,52 @@
+name: MSBuild
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build
+      run: msbuild "a battle arena mod for itr2.sln" /p:Configuration=Release /p:Platform=x64
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: a-battle-arena-mod-for-itr2
+        path: x64/Release/battlearena.dll
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' && github.event.action == 'published'
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: a-battle-arena-mod-for-itr2
+
+    - name: Upload Release Asset
+      uses: softprops/action-gh-release@v2
+      with:
+        files: battlearena.dll
+        draft: false
+        prerelease: ${{ github.event.release.prerelease }}
+        fail_on_unmatched_files: true

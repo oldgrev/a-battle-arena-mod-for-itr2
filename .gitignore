@@ -1,0 +1,61 @@
+# cpp gitignore file
+
+# Build artifacts
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.lib
+*.lnk
+*.dll
+*.exe
+*.out
+*.app
+
+*.gch
+*.pch
+
+*.idb
+*.pdb
+*.ilk
+
+*.db
+*.tlog
+
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
+*.FileListAbsolute.txt
+
+.vs/
+
+*.dSYM/
+*.su
+
+# IDE specific files
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Other build artifacts
+build/
+dist/
+
+# Visual Studio build output
+x64/
+Win32/
+Debug/
+Release/
+
+temp*

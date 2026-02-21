@@ -18,6 +18,9 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        # For private submodules, set SUBMODULES_TOKEN to a PAT with at least `repo` scope.
+        # If not set, this falls back to GITHUB_TOKEN (works for public submodules).
+        token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
         submodules: recursive
         fetch-depth: 0
 

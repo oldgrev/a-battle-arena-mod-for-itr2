@@ -368,7 +368,7 @@ namespace Mod
 
     std::string CommandHandlerRegistry::HandleListNPCs(SDK::UWorld *world, const std::vector<std::string> &args)
     {
-        size_t maxLines = 10;
+        size_t maxLines = Mod::Tuning::kCommandDefaultListMaxLines;
         if (!args.empty())
         {
             try
@@ -491,7 +491,7 @@ namespace Mod
 
     std::string CommandHandlerRegistry::HandleListItems(SDK::UWorld *world, const std::vector<std::string> &args)
     {
-        size_t maxLines = 10;
+        size_t maxLines = Mod::Tuning::kCommandDefaultListMaxLines;
         if (!args.empty())
         {
             try

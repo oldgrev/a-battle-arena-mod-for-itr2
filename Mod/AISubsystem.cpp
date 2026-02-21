@@ -18,6 +18,7 @@
 #include "..\CppSDK\SDK.hpp"
 #include "Logging.hpp"
 #include "HookManager.hpp"
+#include "ModTuning.hpp"
 
 namespace Mod
 {
@@ -178,11 +179,8 @@ if (world->OwningGameInstance && GetTArrayNum(world->OwningGameInstance->LocalPl
 
             // Ground trace: shoot straight down from well above to well below the target XY.
             // This lands the NPC on terrain regardless of elevation changes.
-            constexpr float kTraceUp   = 5000.0f;
-            constexpr float kTraceDown = 5000.0f;
-
-            SDK::FVector traceStart = { targetXY.X, targetXY.Y, targetXY.Z + kTraceUp };
-            SDK::FVector traceEnd   = { targetXY.X, targetXY.Y, targetXY.Z - kTraceDown };
+            SDK::FVector traceStart = { targetXY.X, targetXY.Y, targetXY.Z + Mod::Tuning::kAISpawnGroundTraceUp };
+            SDK::FVector traceEnd   = { targetXY.X, targetXY.Y, targetXY.Z - Mod::Tuning::kAISpawnGroundTraceDown };
 
             SDK::APawn *pawn = Helpers::GetPrimaryPawn(world);
             if (pawn)
@@ -209,7 +207,7 @@ if (world->OwningGameInstance && GetTArrayNum(world->OwningGameInstance->LocalPl
                 if (hitTerrain && hit.bBlockingHit)
                 {
                     // Place at impact point; add a small offset so the capsule origin clears the surface.
-                    targetXY.Z = hit.ImpactPoint.Z + 120.0f;
+                    targetXY.Z = hit.ImpactPoint.Z + Mod::Tuning::kAISpawnGroundZOffset;
                     LOG_INFO("[AI] Ground trace hit at Z=" << hit.ImpactPoint.Z << " -> spawnZ=" << targetXY.Z);
                 }
                 else

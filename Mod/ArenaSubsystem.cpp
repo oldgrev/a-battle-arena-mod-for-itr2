@@ -400,7 +400,7 @@ namespace Mod::Arena
                 SDK::FVector playerLoc = player->K2_GetActorLocation();
                 // Number of enemies already spawned in the pre-spawn phase
                 size_t numEnemies = activeEnemies_.size();
-                float angleStep = 360.0f / static_cast<float>(numEnemies > 0 ? numEnemies : 10);
+                float angleStep = 360.0f / static_cast<float>(numEnemies > 0 ? numEnemies : (size_t)Mod::Tuning::kArenaSpawnAngleFallbackDivisor);
                 
                 for (size_t i = 0; i < numEnemies; ++i)
                 {
@@ -411,7 +411,7 @@ namespace Mod::Arena
                     bool foundNonVisible = false;
 
                     // Try a few offsets to avoid popping into the player's view at wave start.
-                    for (int attempt = 0; attempt < 6; ++attempt)
+                    for (int attempt = 0; attempt < Mod::Tuning::kArenaCandidateSearchAttempts; ++attempt)
                     {
                         const float dist = distance_ + (float)attempt * Mod::Tuning::kArenaRepositionDistanceStep;
                         const float angleOffsetDeg = (attempt == 0)
@@ -426,8 +426,8 @@ namespace Mod::Arena
                         candidate.Z = playerLoc.Z;
 
                         // Ground trace for final position.
-                        SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + 1000.0f };
-                        SDK::FVector traceEnd   = { candidate.X, candidate.Y, candidate.Z - 3000.0f };
+                        SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + Mod::Tuning::kArenaGroundTraceUp };
+                        SDK::FVector traceEnd   = { candidate.X, candidate.Y, candidate.Z - Mod::Tuning::kArenaGroundTraceDown };
                         SDK::FHitResult hit{};
                         SDK::TArray<SDK::AActor*> ignore;
                         ignore.Add(player);
@@ -437,7 +437,7 @@ namespace Mod::Arena
                             continue;
                         }
 
-                        candidate.Z = hit.ImpactPoint.Z + 100.0f;
+                        candidate.Z = hit.ImpactPoint.Z + Mod::Tuning::kArenaGroundSpawnZOffset;
 
                         if (IsLocationInPlayerLineOfSight(world, candidate))
                         {
@@ -530,14 +530,14 @@ namespace Mod::Arena
         LOG_INFO("[Arena] Attempting to spawn NPC " << spawnedInCurrentWave_ + 1 << "/" << enemiesPerWave_ << (farAway ? " (Pre-spawn)" : ""));
 
         // Try multiple times to find a valid spawn location/type
-        for (int attempt = 0; attempt < 10; ++attempt)
+        for (int attempt = 0; attempt < Mod::Tuning::kArenaSpawnMaxAttempts; ++attempt)
         {
             // Pick random class from pool
             std::uniform_int_distribution<> poolDis(0, (int)pool.size() - 1);
             std::string className = pool[poolDis(gen)];
 
             // Add some jitter to the location if previous attempts failed
-            std::uniform_real_distribution<float> jitterDis(-200.0f, 200.0f);
+            std::uniform_real_distribution<float> jitterDis(-Mod::Tuning::kArenaSpawnJitterXY, Mod::Tuning::kArenaSpawnJitterXY);
             const float attemptDist = spawnDist + (float)attempt * Mod::Tuning::kArenaRepositionDistanceStep;
             const float sideAngleOffsetDeg = (attempt == 0)
                 ? 0.0f
@@ -554,8 +554,8 @@ namespace Mod::Arena
             targetLoc.Z = playerLoc.Z;
 
             // Ground trace to ensure we aren't spawning in the void or deep underground
-            SDK::FVector traceStart = { targetLoc.X, targetLoc.Y, targetLoc.Z + 1000.0f };
-            SDK::FVector traceEnd   = { targetLoc.X, targetLoc.Y, targetLoc.Z - 3000.0f };
+            SDK::FVector traceStart = { targetLoc.X, targetLoc.Y, targetLoc.Z + Mod::Tuning::kArenaGroundTraceUp };
+            SDK::FVector traceEnd   = { targetLoc.X, targetLoc.Y, targetLoc.Z - Mod::Tuning::kArenaGroundTraceDown };
             SDK::FHitResult hit{};
             SDK::TArray<SDK::AActor*> ignore;
             SDK::APawn* playerPawn = Mod::GameContext::GetPlayerPawn(world);
@@ -568,7 +568,7 @@ namespace Mod::Arena
                 continue;
             }
 
-            targetLoc.Z = hit.ImpactPoint.Z + 100.0f;
+            targetLoc.Z = hit.ImpactPoint.Z + Mod::Tuning::kArenaGroundSpawnZOffset;
 
             if (IsLocationInPlayerLineOfSight(world, targetLoc))
             {
@@ -618,7 +618,7 @@ namespace Mod::Arena
                     LOG_INFO("[Arena] SpawnDefaultController for " << className);
                     static_cast<SDK::APawn*>(actor)->SpawnDefaultController();
                     auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(actor);
-                    aiChar->GroupID = 101; 
+                    aiChar->GroupID = Mod::Tuning::kArenaNpcGroupId;
                     if (aiChar->AIController)
                     {
                         // Set to Idle if pre-spawning, Combat if direct spawning
@@ -645,7 +645,7 @@ namespace Mod::Arena
             }
         }
 
-        LOG_WARN("[Arena] Failed to spawn NPC after 10 attempts (invalid class or location)");
+        LOG_WARN("[Arena] Failed to spawn NPC after " << Mod::Tuning::kArenaSpawnMaxAttempts << " attempts (invalid class or location)");
         // If we failed after 10 attempts, we should still decrement enemiesToSpawn_ or decide what to do
         // Let's decrement it so we don't try forever if the locations are all bad
         enemiesToSpawn_--; 
@@ -660,11 +660,11 @@ namespace Mod::Arena
         auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(pawn);
         if (aiChar->NPCConfig)
         {
-            aiChar->NPCConfig->MaxSenseDistance = 10000.0f;
-            aiChar->NPCConfig->SoundProofMultiplierDefault = 0.0f;
-            aiChar->NPCConfig->DelayToStartReduceDetectionScale = 0.0f;
-            aiChar->NPCConfig->DetectReductionTime = 0.1f; // Fast detection loss recovery
-            aiChar->NPCConfig->SuspiciousActivityLevel = 1.0f;
+            aiChar->NPCConfig->MaxSenseDistance = Mod::Tuning::kArenaNpcMaxSenseDistance;
+            aiChar->NPCConfig->SoundProofMultiplierDefault = Mod::Tuning::kArenaNpcSoundProofMultiplierDefault;
+            aiChar->NPCConfig->DelayToStartReduceDetectionScale = Mod::Tuning::kArenaNpcDelayToStartReduceDetectionScale;
+            aiChar->NPCConfig->DetectReductionTime = Mod::Tuning::kArenaNpcDetectReductionTime; // Fast detection loss recovery
+            aiChar->NPCConfig->SuspiciousActivityLevel = Mod::Tuning::kArenaNpcSuspiciousActivityLevel;
         }
     }
 
@@ -848,7 +848,7 @@ namespace Mod::Arena
             float distSq = SDK::UKismetMathLibrary::Vector_DistanceSquared(currentPos, it->second.lastPos);
             float distToPlayer = SDK::UKismetMathLibrary::Vector_Distance(currentPos, playerLoc);
 
-            bool isImmobile = distSq < 100.0f; // 10 units movement threshold
+            bool isImmobile = distSq < Mod::Tuning::kArenaStuckMoveDistanceSq; // (10 units)^2 movement threshold
             bool immobileFor10s = isImmobile && ((time - it->second.lastMoveTime) >= Mod::Tuning::kArenaStuckImmobileSeconds);
 
             // Overdue wave: treat static mimics as blockers and cull them to advance the wave.
@@ -894,7 +894,7 @@ namespace Mod::Arena
                 bool foundNonVisible = false;
 
                 // Try a few candidate positions, moving further away and/or to the side if the spot is in LoS.
-                for (int attempt = 0; attempt < 6; ++attempt)
+                for (int attempt = 0; attempt < Mod::Tuning::kArenaCandidateSearchAttempts; ++attempt)
                 {
                     const float attemptDistance = targetDistance + (float)attempt * Mod::Tuning::kArenaTeleportRetryDistanceStep;
                     const float sideAmount = (attempt == 0)
@@ -907,8 +907,8 @@ namespace Mod::Arena
                     candidate.Z = playerLoc.Z;
 
                     // Ground trace to ensure we aren't teleporting into the void or deep underground
-                    SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + 1000.0f };
-                    SDK::FVector traceEnd   = { candidate.X, candidate.Y, candidate.Z - 3000.0f };
+                    SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + Mod::Tuning::kArenaGroundTraceUp };
+                    SDK::FVector traceEnd   = { candidate.X, candidate.Y, candidate.Z - Mod::Tuning::kArenaGroundTraceDown };
                     SDK::FHitResult hit{};
                     SDK::TArray<SDK::AActor*> ignore;
                     if (player) ignore.Add(player);
@@ -919,7 +919,7 @@ namespace Mod::Arena
                         continue;
                     }
 
-                    candidate.Z = hit.ImpactPoint.Z + 100.0f;
+                    candidate.Z = hit.ImpactPoint.Z + Mod::Tuning::kArenaGroundSpawnZOffset;
 
                     if (IsLocationInPlayerLineOfSight(world, candidate))
                     {
@@ -1017,7 +1017,7 @@ namespace Mod::Arena
             auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(actor);
             if (aiChar->AIController)
             {
-                aiChar->AIController->MoveToLocation(playerLoc, 100.0f, true, true, true, true, nullptr, true);
+                    aiChar->AIController->MoveToLocation(playerLoc, Mod::Tuning::kArenaMoveToPlayerAcceptanceRadius, true, true, true, true, nullptr, true);
             }
         }
         LOG_INFO("[Arena] Instructed all NPCs to move to player position");

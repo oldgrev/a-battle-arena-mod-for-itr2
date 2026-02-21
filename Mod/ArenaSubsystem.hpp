@@ -8,6 +8,7 @@
 
 #include "..\CppSDK\SDK.hpp"
 #include "AISubsystem.hpp"
+#include "ModTuning.hpp"
 
 namespace Mod::Arena
 {
@@ -19,7 +20,7 @@ namespace Mod::Arena
         void Initialize(Mod::AI::AISubsystem *aiSubsystem);
 
         // One-time start: arena_start [count] [distance]
-        void Start(int enemiesPerWave = 30, float distance = 5000.0f);
+        void Start(int enemiesPerWave = Mod::Tuning::kArenaDefaultWaveSize, float distance = Mod::Tuning::kArenaDefaultSpawnDistance);
         void Stop();
         bool IsActive() const { return active_.load(); }
 
@@ -60,14 +61,13 @@ namespace Mod::Arena
         std::atomic<bool> active_{false};
         bool isPreSpawning_ = false;
         int wave_ = 0;
-        int enemiesPerWave_ = 10;
-        float distance_ = 5000.0f;
+        int enemiesPerWave_ = Mod::Tuning::kArenaDefaultWaveSize;
+        float distance_ = Mod::Tuning::kArenaDefaultSpawnDistance;
 
         int enemiesToSpawn_ = 0;
         int spawnedInCurrentWave_ = 0;
 
         bool wavePending_ = false;
-        float waveCooldown_ = 5.0f;
         float nextWaveTimer_ = 0.0f;
 
         float lastScanTime_ = 0.0f;

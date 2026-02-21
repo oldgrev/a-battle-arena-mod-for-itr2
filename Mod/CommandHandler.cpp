@@ -18,6 +18,7 @@ Solution: Added 'diag_mimics' for tracing, 'spawn_mimics' now uses true randomiz
 #include "CommandQueue.hpp"
 #include "Cheats.hpp"
 #include "ModFeedback.hpp"
+#include "ModTuning.hpp"
 
 namespace Mod
 {
@@ -218,8 +219,8 @@ namespace Mod
         // Arena: simplified commands
         Register("arena_start", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
                  {
-            int count = 30;
-            float distance = 7000.0f;
+            int count = Mod::Tuning::kArenaDefaultWaveSize;
+            float distance = Mod::Tuning::kArenaDefaultSpawnDistance;
 
             if (args.size() >= 1)
             {

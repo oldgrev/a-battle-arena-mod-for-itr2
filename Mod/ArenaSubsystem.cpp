@@ -27,6 +27,9 @@ AILEARNINGS
 - Arena: Staggered NPC pre-spawning (during 5s cooldown) implemented to eliminate wave-start hitching.
 - Arena: Stalemate fix added to anti-stuck logic; far-away NPCs that aren't making progress are teleported closer.
 - Arena: Wave start locks time-of-day to midday via RadiusTimeSubsystem/TimeController; restored on arena stop.
+- Arena: Spawns/teleports now avoid the player's line-of-sight (view-cone + visibility trace) by retrying further away and/or to the side; teleports rotate NPCs to face the player.
+- Arena: Anti-stuck will not mark an NPC as stuck, teleport it, or cull it if the NPC is currently in the player's view (prevents visible pop-outs).
+- Arena: Core arena tuning values (defaults, intervals, stuck timers, distances) are centralized in ModTuning.hpp for faster iteration.
 */
 
 #include "ArenaSubsystem.hpp"
@@ -34,12 +37,14 @@ AILEARNINGS
 #include "ModFeedback.hpp"
 #include "HookManager.hpp"
 #include "GameContext.hpp"
+#include "ModTuning.hpp"
 
 #include <sstream>
 #include <random>
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <cmath>
 
 namespace Mod::Arena
 {
@@ -79,6 +84,91 @@ namespace Mod::Arena
         }
 
         return true;
+    }
+
+    static SDK::FVector AddZ(const SDK::FVector& v, float dz)
+    {
+        SDK::FVector out = v;
+        out.Z += dz;
+        return out;
+    }
+
+    // Returns true if the location is likely visible in the player's current line-of-sight.
+    // Heuristic:
+    // 1) Must be in front of the player's view within a cone.
+    // 2) A visibility trace from view point to target must be unobstructed (hit near end, or no hit).
+    static bool IsLocationInPlayerLineOfSight(SDK::UWorld* world, const SDK::FVector& location)
+    {
+        if (!world)
+        {
+            return false;
+        }
+
+        SDK::FVector viewLoc{};
+        SDK::FRotator viewRot{};
+        if (!Mod::GameContext::GetPlayerView(world, viewLoc, viewRot))
+        {
+            return false;
+        }
+
+        SDK::FVector toTarget;
+        toTarget.X = location.X - viewLoc.X;
+        toTarget.Y = location.Y - viewLoc.Y;
+        toTarget.Z = location.Z - viewLoc.Z;
+
+        const double lenSq = (double)toTarget.X * (double)toTarget.X + (double)toTarget.Y * (double)toTarget.Y + (double)toTarget.Z * (double)toTarget.Z;
+        if (lenSq < 1.0)
+        {
+            return true;
+        }
+
+        const double invLen = 1.0 / std::sqrt(lenSq);
+        SDK::FVector dir;
+        dir.X = (float)((double)toTarget.X * invLen);
+        dir.Y = (float)((double)toTarget.Y * invLen);
+        dir.Z = (float)((double)toTarget.Z * invLen);
+
+        const SDK::FVector forward = SDK::UKismetMathLibrary::GetForwardVector(viewRot);
+        const double dot = (double)forward.X * (double)dir.X + (double)forward.Y * (double)dir.Y + (double)forward.Z * (double)dir.Z;
+
+        // Rough “on screen” cone. If the point is behind/outside cone, we consider it not in LoS.
+        if (dot < Mod::Tuning::kArenaLoSHalfConeCos)
+        {
+            return false;
+        }
+
+        // Visibility trace: if the first blocking hit is near the end, the point is visible.
+        SDK::FVector traceStart = viewLoc;
+        SDK::FVector traceEnd = AddZ(location, Mod::Tuning::kArenaLoSVisibilityTraceEndZOffset);
+
+        SDK::TArray<SDK::AActor*> ignore;
+        if (auto* playerPawn = Mod::GameContext::GetPlayerPawn(world))
+        {
+            ignore.Add(playerPawn);
+        }
+
+        SDK::FHitResult hit{};
+        const bool hitSomething = SDK::UKismetSystemLibrary::LineTraceSingle(
+            world,
+            traceStart,
+            traceEnd,
+            SDK::ETraceTypeQuery::TraceTypeQuery1,
+            false,
+            ignore,
+            SDK::EDrawDebugTrace::None,
+            &hit,
+            true,
+            SDK::FLinearColor{},
+            SDK::FLinearColor{},
+            0.0f);
+
+        if (!hitSomething || !hit.bBlockingHit)
+        {
+            return true;
+        }
+
+        const float distToEnd = SDK::UKismetMathLibrary::Vector_Distance(hit.ImpactPoint, traceEnd);
+        return distToEnd < Mod::Tuning::kArenaLoSVisibilityHitNearEndDistance;
     }
 
     ArenaSubsystem* ArenaSubsystem::Get()
@@ -250,7 +340,7 @@ namespace Mod::Arena
     void ArenaSubsystem::Start(int enemiesPerWave, float distance)
     {
         enemiesPerWave_ = enemiesPerWave;
-        distance_ = distance;
+        distance_ = (std::max)(distance, Mod::Tuning::kArenaMinSpawnDistance);
         wave_ = 0;
 
         SDK::UWorld *world = SDK::UWorld::GetWorld();
@@ -317,24 +407,55 @@ namespace Mod::Arena
                     SDK::AActor* actor = activeEnemies_[i];
                     if (!actor) continue;
 
-                    float angleRad = (static_cast<float>(i) * angleStep) * (3.14159265f / 180.0f);
-                    SDK::FVector targetLoc = playerLoc;
-                    targetLoc.X += std::cos(angleRad) * distance_;
-                    targetLoc.Y += std::sin(angleRad) * distance_;
+                    SDK::FVector finalLoc = playerLoc;
+                    bool foundNonVisible = false;
 
-                    // Ground trace for final position
-                    SDK::FVector traceStart = { targetLoc.X, targetLoc.Y, targetLoc.Z + 1000.0f };
-                    SDK::FVector traceEnd   = { targetLoc.X, targetLoc.Y, targetLoc.Z - 3000.0f };
-                    SDK::FHitResult hit{};
-                    SDK::TArray<SDK::AActor*> ignore;
-                    ignore.Add(player);
-                    
-                    if (SDK::UKismetSystemLibrary::LineTraceSingle(world, traceStart, traceEnd, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore, SDK::EDrawDebugTrace::None, &hit, true, {}, {}, 0.0f))
+                    // Try a few offsets to avoid popping into the player's view at wave start.
+                    for (int attempt = 0; attempt < 6; ++attempt)
                     {
-                        targetLoc.Z = hit.ImpactPoint.Z + 100.0f;
+                        const float dist = distance_ + (float)attempt * Mod::Tuning::kArenaRepositionDistanceStep;
+                        const float angleOffsetDeg = (attempt == 0)
+                            ? 0.0f
+                            : (((attempt % 2) == 1) ? 1.0f : -1.0f) * Mod::Tuning::kArenaRepositionAngleStepDeg * (float)((attempt + 1) / 2);
+
+                        const float angleRad = ((static_cast<float>(i) * angleStep) + angleOffsetDeg) * (3.14159265f / 180.0f);
+
+                        SDK::FVector candidate = playerLoc;
+                        candidate.X += std::cos(angleRad) * dist;
+                        candidate.Y += std::sin(angleRad) * dist;
+                        candidate.Z = playerLoc.Z;
+
+                        // Ground trace for final position.
+                        SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + 1000.0f };
+                        SDK::FVector traceEnd   = { candidate.X, candidate.Y, candidate.Z - 3000.0f };
+                        SDK::FHitResult hit{};
+                        SDK::TArray<SDK::AActor*> ignore;
+                        ignore.Add(player);
+
+                        if (!SDK::UKismetSystemLibrary::LineTraceSingle(world, traceStart, traceEnd, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore, SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f))
+                        {
+                            continue;
+                        }
+
+                        candidate.Z = hit.ImpactPoint.Z + 100.0f;
+
+                        if (IsLocationInPlayerLineOfSight(world, candidate))
+                        {
+                            continue;
+                        }
+
+                        finalLoc = candidate;
+                        foundNonVisible = true;
+                        break;
                     }
-                    
-                    actor->K2_SetActorLocation(targetLoc, false, nullptr, true);
+
+                    const SDK::FRotator lookRot = SDK::UKismetMathLibrary::FindLookAtRotation(finalLoc, playerLoc);
+                    actor->K2_SetActorLocationAndRotation(finalLoc, lookRot, false, nullptr, true);
+
+                    if (!foundNonVisible)
+                    {
+                        LOG_WARN("[Arena] Wave-start reposition: could not find non-visible spot for pre-spawned NPC " << actor->GetName() << "; used best-effort location");
+                    }
                     
                     // Ensure they are in combat state
                     if (actor->IsA(SDK::APawn::StaticClass()))
@@ -362,7 +483,7 @@ namespace Mod::Arena
         lastScanTime_ = time; // Align scan timer with the immediate scan above
 
         LOG_INFO("[Arena] StartWave: setting attack limit");
-        SetGroupAttackLimit(world, 10);
+        SetGroupAttackLimit(world, Mod::Tuning::kArenaMaxConcurrentAttackers);
         LockTimeOfDay(world, true);
         
         spawnedInCurrentWave_ = preSpawnedCount;
@@ -404,7 +525,7 @@ namespace Mod::Arena
         float angleStep = 360.0f / static_cast<float>(enemiesPerWave_ > 0 ? enemiesPerWave_ : 10);
         float baseAngleDeg = static_cast<float>(spawnedInCurrentWave_) * angleStep;
 
-        float spawnDist = farAway ? (distance_ + 5000.0f) : distance_;
+        float spawnDist = farAway ? (distance_ + Mod::Tuning::kArenaPreSpawnExtraDistance) : distance_;
 
         LOG_INFO("[Arena] Attempting to spawn NPC " << spawnedInCurrentWave_ + 1 << "/" << enemiesPerWave_ << (farAway ? " (Pre-spawn)" : ""));
 
@@ -417,10 +538,15 @@ namespace Mod::Arena
 
             // Add some jitter to the location if previous attempts failed
             std::uniform_real_distribution<float> jitterDis(-200.0f, 200.0f);
-            float angleRad = (baseAngleDeg + (attempt > 0 ? jitterDis(gen) : 0.0f)) * (3.14159265f / 180.0f);
+            const float attemptDist = spawnDist + (float)attempt * Mod::Tuning::kArenaRepositionDistanceStep;
+            const float sideAngleOffsetDeg = (attempt == 0)
+                ? 0.0f
+                : (((attempt % 2) == 1) ? 1.0f : -1.0f) * Mod::Tuning::kArenaRepositionAngleStepDeg * (float)((attempt + 1) / 2);
+            const float angleDeg = baseAngleDeg + sideAngleOffsetDeg + (attempt > 0 ? jitterDis(gen) : 0.0f);
+            const float angleRad = angleDeg * (3.14159265f / 180.0f);
 
-            float offsetX = std::cos(angleRad) * spawnDist;
-            float offsetY = std::sin(angleRad) * spawnDist;
+            const float offsetX = std::cos(angleRad) * attemptDist;
+            const float offsetY = std::sin(angleRad) * attemptDist;
 
             SDK::FVector targetLoc;
             targetLoc.X = playerLoc.X + offsetX;
@@ -435,7 +561,7 @@ namespace Mod::Arena
             SDK::APawn* playerPawn = Mod::GameContext::GetPlayerPawn(world);
             if (playerPawn) ignore.Add(playerPawn);
 
-            bool hitGround = SDK::UKismetSystemLibrary::LineTraceSingle(world, traceStart, traceEnd, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore, SDK::EDrawDebugTrace::None, &hit, true, {}, {}, 0.0f);
+            bool hitGround = SDK::UKismetSystemLibrary::LineTraceSingle(world, traceStart, traceEnd, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore, SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
             
             if (!hitGround)
             {
@@ -443,6 +569,12 @@ namespace Mod::Arena
             }
 
             targetLoc.Z = hit.ImpactPoint.Z + 100.0f;
+
+            if (IsLocationInPlayerLineOfSight(world, targetLoc))
+            {
+                // Try again: push further out or around to the side rather than spawning in front of the player.
+                continue;
+            }
 
             SDK::FTransform transform = SDK::UKismetMathLibrary::MakeTransform(targetLoc, SDK::UKismetMathLibrary::FindLookAtRotation(targetLoc, playerLoc), {1, 1, 1});
             
@@ -618,13 +750,13 @@ namespace Mod::Arena
 
         float time = SDK::UGameplayStatics::GetTimeSeconds(world);
 
-        if (active_.load() && enemiesToSpawn_ > 0 && (time - lastSpawnTime_ > 0.5f))
+        if (active_.load() && enemiesToSpawn_ > 0 && (time - lastSpawnTime_ > Mod::Tuning::kArenaSpawnTickIntervalSeconds))
         {
             SpawnOneNPC(world, false);
             lastSpawnTime_ = time;
         }
 
-        if (time - lastScanTime_ > 30.0f)
+        if (time - lastScanTime_ > Mod::Tuning::kArenaScanIntervalSeconds)
         {
             ScanForNPCs(world);
             lastScanTime_ = time;
@@ -632,7 +764,7 @@ namespace Mod::Arena
 
         if (active_.load())
         {
-            if (time - lastMoveToPlayerTime_ > 30.0f)
+            if (time - lastMoveToPlayerTime_ > Mod::Tuning::kArenaMoveToPlayerIntervalSeconds)
             {
                 InstructNPCsToMoveToPlayer(world);
                 lastMoveToPlayerTime_ = time;
@@ -660,7 +792,7 @@ namespace Mod::Arena
 
         float time = SDK::UGameplayStatics::GetTimeSeconds(world);
         // Stagger pre-spawning over the cooldown window
-        float spawnInterval = (waveCooldown_ - 0.5f) / static_cast<float>(enemiesPerWave_ > 0 ? enemiesPerWave_ : 10);
+        float spawnInterval = (Mod::Tuning::kArenaWaveCooldownSeconds - 0.5f) / static_cast<float>(enemiesPerWave_ > 0 ? enemiesPerWave_ : 10);
         
         if (time - lastPreSpawnTime_ > spawnInterval)
         {
@@ -676,7 +808,16 @@ namespace Mod::Arena
         if (!player) return;
         SDK::FVector playerLoc = player->K2_GetActorLocation();
 
-        bool waveOverdue = active_.load() && (time - waveStartTime_ > 120.0f);
+        SDK::FVector viewLoc{};
+        SDK::FRotator viewRot{};
+        (void)Mod::GameContext::GetPlayerView(world, viewLoc, viewRot);
+
+        SDK::FRotator flatRot = viewRot;
+        flatRot.Pitch = 0.0f;
+        flatRot.Roll = 0.0f;
+        const SDK::FVector viewRight = SDK::UKismetMathLibrary::GetRightVector(flatRot);
+
+        bool waveOverdue = active_.load() && (time - waveStartTime_ > Mod::Tuning::kArenaOverdueWaveSeconds);
 
         std::lock_guard<std::recursive_mutex> lock(activeEnemiesMutex_);
         std::vector<SDK::AActor*> stale;
@@ -696,11 +837,19 @@ namespace Mod::Arena
                 continue;
             }
 
+            // Never teleport or even accumulate “stuck” time for an NPC the player can currently see.
+            if (IsLocationInPlayerLineOfSight(world, currentPos))
+            {
+                it->second.lastPos = currentPos;
+                it->second.lastMoveTime = time;
+                continue;
+            }
+
             float distSq = SDK::UKismetMathLibrary::Vector_DistanceSquared(currentPos, it->second.lastPos);
             float distToPlayer = SDK::UKismetMathLibrary::Vector_Distance(currentPos, playerLoc);
 
             bool isImmobile = distSq < 100.0f; // 10 units movement threshold
-            bool immobileFor10s = isImmobile && ((time - it->second.lastMoveTime) >= 10.0f);
+            bool immobileFor10s = isImmobile && ((time - it->second.lastMoveTime) >= Mod::Tuning::kArenaStuckImmobileSeconds);
 
             // Overdue wave: treat static mimics as blockers and cull them to advance the wave.
             bool looksLikeMimic = false;
@@ -721,7 +870,7 @@ namespace Mod::Arena
             if (immobileFor10s)
             {
                 // Rate-limit teleports per NPC to avoid spam.
-                if ((time - it->second.lastTeleportTime) < 3.0f)
+                if ((time - it->second.lastTeleportTime) < Mod::Tuning::kArenaStuckTeleportCooldownSeconds)
                 {
                     continue;
                 }
@@ -739,23 +888,58 @@ namespace Mod::Arena
                 // Windows headers define a problematic macro named "max" that can
                 // turn "std::max" into "std.(" and crash the parser.  Wrap the
                 // call in parentheses to suppress macro expansion.
-                float targetDistance = (std::max)(1000.0f, distance_ * 0.5f);
-                SDK::FVector newPos = playerLoc + (dir * targetDistance);
-                
-                // Ground trace to ensure we aren't teleporting into the void or deep underground
-                SDK::FVector traceStart = { newPos.X, newPos.Y, newPos.Z + 1000.0f };
-                SDK::FVector traceEnd   = { newPos.X, newPos.Y, newPos.Z - 3000.0f };
-                SDK::FHitResult hit{};
-                SDK::TArray<SDK::AActor*> ignore;
-                if (player) ignore.Add(player);
-                bool hitGround = SDK::UKismetSystemLibrary::LineTraceSingle(world, traceStart, traceEnd, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore, SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
-                if (hitGround)
+                float targetDistance = (std::max)(Mod::Tuning::kArenaTeleportMinDistanceFromPlayer, distance_ * Mod::Tuning::kArenaTeleportDistanceFactor);
+
+                SDK::FVector newPos{};
+                bool foundNonVisible = false;
+
+                // Try a few candidate positions, moving further away and/or to the side if the spot is in LoS.
+                for (int attempt = 0; attempt < 6; ++attempt)
                 {
-                    newPos.Z = hit.ImpactPoint.Z + 100.0f;
+                    const float attemptDistance = targetDistance + (float)attempt * Mod::Tuning::kArenaTeleportRetryDistanceStep;
+                    const float sideAmount = (attempt == 0)
+                        ? 0.0f
+                        : (((attempt % 2) == 1) ? 1.0f : -1.0f) * Mod::Tuning::kArenaTeleportRetrySideStep * (float)((attempt + 1) / 2);
+
+                    SDK::FVector candidate = playerLoc + (dir * attemptDistance);
+                    candidate.X += viewRight.X * sideAmount;
+                    candidate.Y += viewRight.Y * sideAmount;
+                    candidate.Z = playerLoc.Z;
+
+                    // Ground trace to ensure we aren't teleporting into the void or deep underground
+                    SDK::FVector traceStart = { candidate.X, candidate.Y, candidate.Z + 1000.0f };
+                    SDK::FVector traceEnd   = { candidate.X, candidate.Y, candidate.Z - 3000.0f };
+                    SDK::FHitResult hit{};
+                    SDK::TArray<SDK::AActor*> ignore;
+                    if (player) ignore.Add(player);
+
+                    bool hitGround = SDK::UKismetSystemLibrary::LineTraceSingle(world, traceStart, traceEnd, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore, SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
+                    if (!hitGround)
+                    {
+                        continue;
+                    }
+
+                    candidate.Z = hit.ImpactPoint.Z + 100.0f;
+
+                    if (IsLocationInPlayerLineOfSight(world, candidate))
+                    {
+                        continue;
+                    }
+
+                    newPos = candidate;
+                    foundNonVisible = true;
+                    break;
                 }
 
-                actor->K2_SetActorLocation(newPos, false, nullptr, true);
-                LOG_INFO("[Arena] Anti-stuck: Teleported NPC " << actor->GetName() << " towards player (min 10m clamp)");
+                if (!foundNonVisible)
+                {
+                    LOG_WARN("[Arena] Anti-stuck: skipping teleport for " << actor->GetName() << " (could not find non-visible destination)");
+                    continue;
+                }
+
+                const SDK::FRotator lookRot = SDK::UKismetMathLibrary::FindLookAtRotation(newPos, playerLoc);
+                actor->K2_SetActorLocationAndRotation(newPos, lookRot, false, nullptr, true);
+                LOG_INFO("[Arena] Anti-stuck: Teleported NPC " << actor->GetName() << " towards player (LoS-safe, facing player)");
                 
                 it->second.lastPos = newPos;
                 it->second.lastMoveTime = time;
@@ -790,8 +974,8 @@ namespace Mod::Arena
     void ArenaSubsystem::CheckProximityNotification(SDK::UWorld* world)
     {
         float time = SDK::UGameplayStatics::GetTimeSeconds(world);
-        if (time - waveStartTime_ < 30.0f) return;
-        if (time - lastProximityNoticeTime_ < 5.0f) return;
+        if (time - waveStartTime_ < Mod::Tuning::kArenaProximityNoticeStartSeconds) return;
+        if (time - lastProximityNoticeTime_ < Mod::Tuning::kArenaProximityNoticeIntervalSeconds) return;
 
         SDK::APawn* player = Mod::GameContext::GetPlayerPawn(world);
         if (!player) return;
@@ -896,14 +1080,16 @@ namespace Mod::Arena
         }
 
         LOG_INFO("[Arena] Wave clear! Stats — dmg=" << dmg << ", bullets=" << bullets << ", wave=" << wave_ << ", enemiesPerWave=" << enemiesPerWave_);
-        Mod::ModFeedback::ShowMessage(L"Wave Cleared! Next wave in 5s...", 5.0f, SDK::FLinearColor{0.4f, 1.0f, 0.4f, 1.0f});
+        wchar_t msg[128]{};
+        _snwprintf_s(msg, _TRUNCATE, L"Wave Cleared! Next wave in %.0fs...", Mod::Tuning::kArenaNextWaveDelaySeconds);
+        Mod::ModFeedback::ShowMessage(msg, Mod::Tuning::kArenaNextWaveDelaySeconds, SDK::FLinearColor{0.4f, 1.0f, 0.4f, 1.0f});
         
         active_.store(false);
         wavePending_ = true;
         isPreSpawning_ = true;
         enemiesToSpawn_ = enemiesPerWave_;
         spawnedInCurrentWave_ = 0;
-        nextWaveTimer_ = 5.0f;
+        nextWaveTimer_ = Mod::Tuning::kArenaNextWaveDelaySeconds;
     }
 
     void ArenaSubsystem::RecordPlayerDamageTaken(float damage)

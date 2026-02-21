@@ -17,6 +17,7 @@ SetUnlimitedAmmo/SetGodMode/etc.
 
 #include "Logging.hpp"
 #include "ArenaSubsystem.hpp"
+#include "ModTuning.hpp"
 
 namespace Mod
 {
@@ -191,8 +192,8 @@ namespace Mod
 
     void Cheats::SetBulletTimeScale(float scale)
     {
-        if (scale <= 0.0f) scale = 0.001f;
-        if (scale > 1.0f) scale = 1.0f;
+        if (scale <= 0.0f) scale = Mod::Tuning::kBulletTimeMinScale;
+        if (scale > Mod::Tuning::kBulletTimeMaxScale) scale = Mod::Tuning::kBulletTimeMaxScale;
         
         bulletTimeScale_ = scale;
         LOG_INFO("[Cheats] Bullet Time scale set to " << scale);

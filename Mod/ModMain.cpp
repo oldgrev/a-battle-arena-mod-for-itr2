@@ -45,6 +45,7 @@
 #include "RuntimeState.hpp"
 #include "ArenaSubsystem.hpp"
 #include "GameContext.hpp"
+#include "ModTuning.hpp"
 #include "..\CppSDK\SDK.hpp"
 
 
@@ -52,8 +53,6 @@ namespace Mod
 {
     namespace
     {
-        constexpr uint16_t kDefaultPort = 7777;
-
 		static HANDLE gSingleInstanceMutex = nullptr;
 
         void InitializeLogging()
@@ -110,14 +109,6 @@ namespace Mod
         RuntimeState::SetCommandHandlerRegistry(&commandHandler);
         RuntimeState::SetCommandQueue(&commandQueue);
 
-        if (!server.Start(kDefaultPort, &commandQueue))
-        {
-            LOG_ERROR("[mod] Failed to start TCP server on port " << kDefaultPort);
-        }
-        else
-        {
-            LOG_INFO("[mod] TCP server started on port " << kDefaultPort);
-        }
 
         // Main background loop
         while (true)
@@ -134,6 +125,16 @@ namespace Mod
                 {
                     LOG_INFO("[mod] GObjects looks ready (" << SDK::UObject::GObjects->Num() << " objects), retrying hook installation...");
                     HookManager::Get().InstallProcessEventHook();
+                    
+                    // moved to here from before the while loop, because if the process isn't hooked, the tick loop that processes TCP commands won't run, so the retry would never fire. If for some reason 2 instances of this are loaded and the first one is non-functional, it won't ever hook and so won't start the server, making sure it's not in the way of a functional instance.
+                    if (!server.Start(Mod::Tuning::kTcpDefaultPort, &commandQueue))
+                    {
+                        LOG_ERROR("[mod] Failed to start TCP server on port " << Mod::Tuning::kTcpDefaultPort);
+                    }
+                    else
+                    {
+                        LOG_INFO("[mod] TCP server started on port " << Mod::Tuning::kTcpDefaultPort);
+                    }
                 }
             }
 

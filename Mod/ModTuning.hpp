@@ -13,8 +13,8 @@ namespace Mod::Tuning
     // Arena
     // ---------------------------------------------------------------------
     inline constexpr int   kArenaDefaultWaveSize = 40;
-    inline constexpr float kArenaDefaultSpawnDistance = 8000.0f;
-    inline constexpr float kArenaMinSpawnDistance = 3000.0f;
+    inline constexpr float kArenaDefaultSpawnDistance = 10000.0f;
+    inline constexpr float kArenaMinSpawnDistance = 8000.0f;
 
     // Pre-spawn happens during wave cooldown; we spawn far away to avoid hitching,
     // then reposition into the final ring at wave start.
@@ -22,6 +22,9 @@ namespace Mod::Tuning
 
     inline constexpr float kArenaWaveCooldownSeconds = 5.0f;
     inline constexpr float kArenaNextWaveDelaySeconds = 5.0f;
+
+    // Pre-spawn interval guard: never spawn faster than this regardless of wave size.
+    inline constexpr float kArenaMinPreSpawnInterval = 0.05f; // 50ms
 
     inline constexpr float kArenaSpawnTickIntervalSeconds = 0.5f;
     inline constexpr float kArenaScanIntervalSeconds = 30.0f;

@@ -26,6 +26,8 @@
 //   instance can own the TCP server/CommandQueue while the other instance owns the ProcessEvent hook and
 //   tick loop. Symptom: telnet connects but commands get no responses. Fix: add a PID-scoped named mutex
 //   guard so only one ModMain thread runs per process, and log PID/TID + module path.
+// - Crash/duplicate-events symptom: If you see duplicated level-change logs milliseconds apart (e.g. L_Startup -> L_MainMenu twice), assume the mod is double-loaded.
+//   Fix: enforce the PID-scoped named mutex guard in ModMain::Run so the second instance exits immediately.
 //
 
 
@@ -45,6 +47,7 @@
 #include "RuntimeState.hpp"
 #include "ArenaSubsystem.hpp"
 #include "GameContext.hpp"
+#include "ModFeedback.hpp"
 #include "ModTuning.hpp"
 #include "..\CppSDK\SDK.hpp"
 
@@ -92,6 +95,23 @@ namespace Mod
         // Initialize logging first
         InitializeLogging();
         LOG_INFO("[mod] Starting mod main loop.");
+
+        // Guard against split-DLL/double-load: only allow one mod main loop per process.
+        // If two instances run, you'll see duplicated level-change logs and can get hard-to-debug crashes.
+        if (!gSingleInstanceMutex)
+        {
+            const DWORD pid = GetCurrentProcessId();
+            char nameBuf[128] = {};
+            snprintf(nameBuf, sizeof(nameBuf), "ITR2_BattleArenaMod_Singleton_%lu", (unsigned long)pid);
+            gSingleInstanceMutex = CreateMutexA(nullptr, TRUE, nameBuf);
+            const DWORD lastErr = GetLastError();
+            if (!gSingleInstanceMutex || lastErr == ERROR_ALREADY_EXISTS)
+            {
+                LOG_WARN("[mod] Another mod instance is already running (pid=" << pid << "); exiting this instance's Run() thread");
+                return 0;
+            }
+            LOG_INFO("[mod] Single-instance mutex acquired (pid=" << pid << ")");
+        }
 
         // Initialize hook manager
         HookManager::Get().Initialize();
@@ -199,6 +219,10 @@ namespace Mod
 
         if (world)
         {
+            // Replay any mod feedback that was suppressed during Startup/MainMenu.
+            // (Avoids crashes from emitting subtitles too early, while still delivering the message once safe.)
+            Mod::ModFeedback::DrainPending();
+
             // Update cheats
             Cheats* cheats = GetCheats();
             if (cheats)

@@ -16,6 +16,16 @@
 // - Reentry guard scope matters: guarding the entire named-hook handler (including calling originalFn) prevents nested ProcessEvent calls from being intercepted.
 //   That broke unlimited ammo because TryExtractNextItem can be invoked during ServerShootProjectile's original call chain. Fix: only guard the resync SDK calls (ForceResyncFirearm), not the whole handler.
 // - SDK::UObject::GObjects is a TUObjectArrayWrapper. You MUST use '->' to access Num() or other TUObjectArray members (e.g. GObjects->Num()), not '.', otherwise it won't compile.
+// - Compilation gotcha: the dumped SDK "*_parameters.hpp" structs live under `namespace SDK::Params`, but that namespace isn't guaranteed visible everywhere via the umbrella include.
+//   Fix: for ProcessEvent hooks, prefer defining a minimal local params struct that matches the function signature (as we already do for other hooks).
+// - Trace-mode compile failure: a large diagnostics block was accidentally inserted inside the `UnsafeTArrayNum` template function body, causing cascading C2760 syntax errors and missing identifiers.
+//   Fix: restore `UnsafeTArrayNum` to a minimal layout-based implementation and keep trace code + HookManager::Trace_* methods at top-level scope.
+// - Trace JSON log compile error (C2001 newline in constant): an extra quote in the JSON builder (`... << "\\\""";`) accidentally created an unterminated string literal.
+//   Fix: ensure the JSON line ends with exactly one closing quote for the field (`... << "\\\"";`).
+// - Tablet diag compile error: some SDK actor types (e.g. `SDK::ARadiusGrippableActorBase`) don't expose `GetClass()` helpers in this generator version.
+//   Fix: avoid `GetClass()` and rely on `GetFullName()` (which includes class/name context) or access the UClass pointer only if the SDK actually exposes it.
+// - Trace/notification gotcha: ProcessEvent tracing will show `BP_RadiusPlayerCharacter_Gameplay_C.ShowSubtitles`, but it will NOT show `UFLGeneral::ShowMessage` because that's a native static call (not a reflected ProcessEvent).
+//   Fix: when bridging notifications, log an explicit `[NotifBridge] MIRROR ...` line so we can prove popup emission in one VR run.
 //
 
 
@@ -30,8 +40,17 @@
 #include "ArenaSubsystem.hpp"
 
 #include "ModFeedback.hpp"
+#include "GameContext.hpp"
 
 #include <Windows.h>
+#include <array>
+#include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <vector>
 #include <unordered_set>
 
 namespace Mod
@@ -69,6 +88,366 @@ namespace Mod
             };
 
             return reinterpret_cast<const Layout *>(&array)->NumElements;
+        }
+
+        // ---------------------------------------------------------------------
+        // Diagnostics: "log literally everything" ProcessEvent trace mode.
+        // ---------------------------------------------------------------------
+        struct TraceEvent
+        {
+            SDK::UObject* Object;
+            SDK::UFunction* Function;
+            uint32_t ThreadId;
+        };
+
+        static std::atomic<bool> gTraceEnabled{false};
+        static std::atomic<uint32_t> gTraceWriteIndex{0};
+        static constexpr uint32_t kTraceRingSize = 8192;
+        static std::array<TraceEvent, kTraceRingSize> gTraceRing{};
+
+        // Counts by function pointer (resolve name on dump) to avoid string work in the hot path.
+        static std::mutex gTraceMutex;
+        static std::unordered_map<SDK::UFunction*, uint32_t> gTraceFnCounts;
+        static std::string gTraceFilterLower; // if non-empty: only trace when function full name contains this substring
+        static std::string gTraceObjectFilterLower; // if non-empty: only trace when object full name contains this substring
+
+        // ---------------------------------------------------------------------
+        // Diagnostics toggles (kept cheap in ProcessEvent hot path)
+        // ---------------------------------------------------------------------
+        static std::atomic<bool> gTabletInteractionDiagEnabled{false};
+        static std::atomic<bool> gNotifBridgeEnabled{false};
+        static std::atomic<bool> gNotifBridgePlaySound{false};
+
+        // Last tablet interaction summary for TCP retrieval.
+        static std::mutex gTabletInteractionMutex;
+        static std::string gLastTabletInteraction;
+
+        // UC::FString is non-owning in this runtime. Keep buffers stable.
+        static SDK::FString MakeStableFString(const std::wstring& value)
+        {
+            static thread_local std::array<std::wstring, 32> ring;
+            static thread_local uint32_t ringIndex = 0;
+            std::wstring& slot = ring[ringIndex++ % ring.size()];
+            slot = value;
+            return SDK::FString(slot.c_str());
+        }
+
+        static std::wstring WidenLossy(const std::string& s)
+        {
+            return std::wstring(s.begin(), s.end());
+        }
+
+        struct TraceFileWriter
+        {
+            std::mutex Mutex;
+            std::ofstream File;
+            std::string Path;
+            std::string Buffer;
+            uint64_t BytesWritten = 0;
+            uint64_t LastFlushTickMs = 0;
+
+            static std::string GetTempTracePath()
+            {
+                char tempPath[MAX_PATH] = {};
+                DWORD len = GetTempPathA(MAX_PATH, tempPath);
+                if (len == 0 || len >= MAX_PATH)
+                {
+                    return std::string("C:\\itr2_trace.log");
+                }
+
+                std::string path(tempPath);
+                if (!path.empty() && path.back() != '\\')
+                    path.push_back('\\');
+                path += "itr2_trace.log";
+                return path;
+            }
+
+            static std::string CurrentTimeString()
+            {
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                char buffer[64] = {};
+                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+                         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+                return std::string(buffer);
+            }
+
+            static uint64_t NowTickMs()
+            {
+                return static_cast<uint64_t>(GetTickCount64());
+            }
+
+            static std::string JsonEscape(const std::string& s)
+            {
+                std::string out;
+                out.reserve(s.size() + 8);
+                for (char ch : s)
+                {
+                    switch (ch)
+                    {
+                    case '\\': out += "\\\\"; break;
+                    case '"': out += "\\\""; break;
+                    case '\n': out += "\\n"; break;
+                    case '\r': out += "\\r"; break;
+                    case '\t': out += "\\t"; break;
+                    default:
+                        if (static_cast<unsigned char>(ch) < 0x20)
+                        {
+                            char buf[8] = {};
+                            snprintf(buf, sizeof(buf), "\\u%04x", (unsigned int)(unsigned char)ch);
+                            out += buf;
+                        }
+                        else
+                        {
+                            out.push_back(ch);
+                        }
+                        break;
+                    }
+                }
+                return out;
+            }
+
+            void EnsureOpenLocked(bool truncate)
+            {
+                if (Path.empty())
+                    Path = GetTempTracePath();
+
+                if (File.is_open())
+                {
+                    if (!truncate)
+                        return;
+                    File.close();
+                }
+
+                if (truncate)
+                    File.open(Path, std::ios::out | std::ios::trunc);
+                else
+                    File.open(Path, std::ios::out | std::ios::app);
+
+                if (!File.is_open())
+                {
+                    // Fall back: disable buffering so callers still progress without crashing.
+                    Buffer.clear();
+                }
+            }
+
+            void AppendLineLocked(const std::string& line)
+            {
+                Buffer.append(line);
+                Buffer.push_back('\n');
+
+                const uint64_t now = NowTickMs();
+                const bool sizeFlush = Buffer.size() >= 256 * 1024;
+                const bool timeFlush = (LastFlushTickMs == 0) || (now - LastFlushTickMs >= 500);
+                if (sizeFlush || timeFlush)
+                    FlushLocked();
+            }
+
+            void FlushLocked()
+            {
+                if (!File.is_open())
+                {
+                    LastFlushTickMs = NowTickMs();
+                    Buffer.clear();
+                    return;
+                }
+
+                if (!Buffer.empty())
+                {
+                    File.write(Buffer.data(), static_cast<std::streamsize>(Buffer.size()));
+                    File.flush();
+                    BytesWritten += Buffer.size();
+                    Buffer.clear();
+                }
+
+                LastFlushTickMs = NowTickMs();
+            }
+
+            void WriteMarkerLocked(const char* type, const std::string& detailsJson)
+            {
+                EnsureOpenLocked(false);
+                std::ostringstream oss;
+                oss << "{\"type\":\"" << type << "\",\"ts\":\"" << CurrentTimeString() << "\"";
+                if (!detailsJson.empty())
+                    oss << "," << detailsJson;
+                oss << "}";
+                AppendLineLocked(oss.str());
+            }
+
+            void ResetFile()
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(true);
+                Buffer.clear();
+                BytesWritten = 0;
+                LastFlushTickMs = 0;
+                WriteMarkerLocked("TRACE_RESET", "\"note\":\"trace file truncated\"");
+                FlushLocked();
+            }
+
+            void OnEnabledChanged(bool enabled, const std::string& fnFilter, const std::string& objFilter)
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(false);
+
+                std::ostringstream details;
+                details << "\"path\":\"" << JsonEscape(Path) << "\""
+                        << ",\"enabled\":" << (enabled ? "true" : "false")
+                        << ",\"fnFilter\":\"" << JsonEscape(fnFilter) << "\""
+                        << ",\"objFilter\":\"" << JsonEscape(objFilter) << "\"";
+
+                WriteMarkerLocked(enabled ? "TRACE_ENABLED" : "TRACE_DISABLED", details.str());
+                FlushLocked();
+
+                if (!enabled && File.is_open())
+                {
+                    File.close();
+                }
+            }
+
+            void Flush()
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(false);
+                FlushLocked();
+            }
+
+            std::string GetPathCopy()
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                if (Path.empty())
+                    Path = GetTempTracePath();
+                return Path;
+            }
+        };
+
+        static TraceFileWriter gTraceFile;
+
+        static std::string ToLowerCopy(std::string s)
+        {
+            for (char& c : s) c = (char)tolower((unsigned char)c);
+            return s;
+        }
+
+        static bool TracePassesFilter(const std::string& fnFullLower, const std::string& objFullLower)
+        {
+            std::string filter;
+            std::string objFilter;
+            {
+                std::lock_guard<std::mutex> lock(gTraceMutex);
+                filter = gTraceFilterLower;
+                objFilter = gTraceObjectFilterLower;
+            }
+
+            if (!filter.empty())
+            {
+                if (fnFullLower.find(filter) == std::string::npos)
+                    return false;
+            }
+            if (!objFilter.empty())
+            {
+                if (objFullLower.find(objFilter) == std::string::npos)
+                    return false;
+            }
+            return true;
+        }
+
+        static void TraceOnProcessEvent(SDK::UObject* obj, SDK::UFunction* fn)
+        {
+            if (!gTraceEnabled.load(std::memory_order_relaxed))
+                return;
+            if (!obj || !fn)
+                return;
+
+            // In trace mode we intentionally do string work so that the output is self-contained.
+            // This keeps the trace log usable even if the process crashes.
+            const std::string fnFull = fn->GetFullName();
+            const std::string objFull = obj->GetFullName();
+            const std::string fnLower = ToLowerCopy(fnFull);
+            const std::string objLower = ToLowerCopy(objFull);
+
+            if (!TracePassesFilter(fnLower, objLower))
+                return;
+
+            const uint32_t index = gTraceWriteIndex.fetch_add(1, std::memory_order_relaxed);
+            gTraceRing[index % kTraceRingSize] = TraceEvent{obj, fn, GetCurrentThreadId()};
+
+            {
+                std::lock_guard<std::mutex> lock(gTraceMutex);
+                ++gTraceFnCounts[fn];
+            }
+
+            // Persist full event data (crash survivable) in a dedicated trace file.
+            {
+                // Keep the JSON line small and grep-friendly.
+                std::ostringstream oss;
+                oss << "{\"type\":\"ProcessEvent\",\"ts\":\"" << TraceFileWriter::CurrentTimeString() << "\""
+                    << ",\"seq\":" << index
+                    << ",\"tid\":" << GetCurrentThreadId()
+                    << ",\"objPtr\":\"0x" << std::hex << reinterpret_cast<uintptr_t>(obj) << std::dec << "\""
+                    << ",\"fnPtr\":\"0x" << std::hex << reinterpret_cast<uintptr_t>(fn) << std::dec << "\""
+                    << ",\"obj\":\"" << TraceFileWriter::JsonEscape(objFull) << "\""
+                    << ",\"fn\":\"" << TraceFileWriter::JsonEscape(fnFull) << "\"";
+                oss << "}";
+
+                std::lock_guard<std::mutex> lock(gTraceFile.Mutex);
+                gTraceFile.EnsureOpenLocked(false);
+                gTraceFile.AppendLineLocked(oss.str());
+            }
+        }
+
+        static void TraceReset()
+        {
+            gTraceWriteIndex.store(0, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(gTraceMutex);
+            gTraceFnCounts.clear();
+        }
+
+        static std::string TraceDumpSummary(int topN, int lastN)
+        {
+            if (topN <= 0) topN = 30;
+            if (lastN <= 0) lastN = 50;
+
+            std::vector<std::pair<SDK::UFunction*, uint32_t>> counts;
+            {
+                std::lock_guard<std::mutex> lock(gTraceMutex);
+                counts.reserve(gTraceFnCounts.size());
+                for (auto& kv : gTraceFnCounts) counts.push_back(kv);
+            }
+
+            std::sort(counts.begin(), counts.end(), [](auto& a, auto& b) { return a.second > b.second; });
+
+            std::ostringstream oss;
+            oss << "TraceEnabled=" << (gTraceEnabled.load() ? "true" : "false")
+                << " RingWrite=" << gTraceWriteIndex.load() << "\n";
+
+            {
+                std::lock_guard<std::mutex> lock(gTraceMutex);
+                oss << "Filter='" << gTraceFilterLower << "'\n";
+            }
+
+            oss << "Top functions:\n";
+            const int limit = std::min<int>(topN, (int)counts.size());
+            for (int i = 0; i < limit; ++i)
+            {
+                SDK::UFunction* fn = counts[i].first;
+                const uint32_t c = counts[i].second;
+                oss << "  [" << c << "] " << (fn ? fn->GetFullName() : std::string("<null>")) << "\n";
+            }
+
+            oss << "Last events:\n";
+            const uint32_t write = gTraceWriteIndex.load(std::memory_order_relaxed);
+            const uint32_t available = std::min<uint32_t>(write, kTraceRingSize);
+            const uint32_t take = std::min<uint32_t>((uint32_t)lastN, available);
+            for (uint32_t i = 0; i < take; ++i)
+            {
+                const uint32_t idx = (write - 1 - i) % kTraceRingSize;
+                const TraceEvent& e = gTraceRing[idx];
+                const std::string objName = e.Object ? e.Object->GetFullName() : std::string("<null>");
+                const std::string fnName = e.Function ? e.Function->GetFullName() : std::string("<null>");
+                oss << "  T" << e.ThreadId << " " << objName << " :: " << fnName << "\n";
+            }
+            return oss.str();
         }
 
         // ProcessEvent reentry guard used to bypass hooks when we intentionally call SDK/Blueprint functions.
@@ -208,6 +587,20 @@ namespace Mod
         struct ChangeStatsParams
         {
             float Delta;
+        };
+
+        struct SetHolsteredActorParams
+        {
+            SDK::ARadiusGrippableActorBase* ActorToHolster;
+        };
+
+        // RequestAttackRole parameters (coordination subsystem).  We only care
+        // about the return value, but matching layout prevents stack corruption.
+        struct RequestAttackRoleParams
+        {
+            SDK::ARadiusAIControllerBase* AIController;
+            SDK::TDelegate<void()> AttackRoleDelegate;
+            bool ReturnValue;
         };
 
         void ForceResyncFirearm(SDK::URadiusFirearmComponent *component)
@@ -428,6 +821,353 @@ namespace Mod
             return false;
         }
 
+        // Hook to force every RequestAttackRole call to succeed; useful for
+        // observing how NPCs behave when they always think they can be aggressive.
+        bool Hook_RequestAttackRole(SDK::UObject *object, SDK::UFunction *function, void *parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)object;
+            (void)function;
+            if (!parms || !originalFn)
+            {
+                return false;
+            }
+
+            auto *p = reinterpret_cast<RequestAttackRoleParams*>(parms);
+            // let the normal logic run in case it queues delegates etc.
+            originalFn(object, function, parms);
+            p->ReturnValue = true;
+
+            static int logs = 0;
+            if (logs < 20)
+            {
+                logs++;
+                LOG_INFO("[HookManager][RequestAttackRole] forced true");
+            }
+            return true;
+        }
+
+        // Diagnostics: capture what the game uses for VR-visible notifications.
+        // These are gated behind trace mode so they don't add noise/perf cost during normal play.
+        struct Player_ShowSubtitles_Params
+        {
+            SDK::ESubtitleInstigator SubtitleInstigator;
+            uint8_t Pad_1[0x7];
+            SDK::FText Message;
+            float Duration;
+        };
+
+        struct FLGeneral_ShowSubtitles_Params
+        {
+            const SDK::UObject* WorldContextObject;
+            SDK::ESubtitleInstigator SubtitleInstigator;
+            uint8_t Pad_9[0x7];
+            SDK::FText Message;
+            float Duration;
+            uint8_t Pad_24[0x4];
+        };
+
+        struct FLGeneral_ShowMessage_Params
+        {
+            SDK::FString Message;
+            SDK::FString Title;
+        };
+
+        bool Hook_LogShowSubtitles(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            const bool doDiag = gTraceEnabled.load(std::memory_order_relaxed);
+            const bool doBridge = gNotifBridgeEnabled.load(std::memory_order_relaxed);
+            if (!doDiag && !doBridge)
+                return false;
+
+            if (!object || !function || !parms)
+                return false;
+
+            static int diagLogs = 0;
+            const bool allowDiagLog = doDiag && (diagLogs < 200);
+
+            const std::string fnFull = function->GetFullName();
+            SDK::FText msgText{};
+            SDK::ESubtitleInstigator inst = SDK::ESubtitleInstigator::System;
+            float duration = 0.0f;
+
+
+            if (fnFull.find("FLGeneral.ShowSubtitles") != std::string::npos)
+            {
+                auto* p = reinterpret_cast<FLGeneral_ShowSubtitles_Params*>(parms);
+                msgText = p->Message;
+                inst = p->SubtitleInstigator;
+                duration = p->Duration;
+            }
+            else
+            {
+                auto* p = reinterpret_cast<Player_ShowSubtitles_Params*>(parms);
+                msgText = p->Message;
+                inst = p->SubtitleInstigator;
+                duration = p->Duration;
+            }
+
+            SDK::FString msgStr;
+            {
+                ScopedProcessEventGuard guard;
+                msgStr = SDK::UKismetTextLibrary::Conv_TextToString(msgText);
+            }
+
+            const std::string msgStd = msgStr.ToString();
+
+            if (allowDiagLog)
+            {
+                ++diagLogs;
+                LOG_INFO("[NotifDiag] ShowSubtitles inst=" << (int)inst << " dur=" << duration
+                                                          << " obj=" << object->GetFullName()
+                                                          << " fn=" << fnFull
+                                                          << " text='" << msgStd << "'");
+            }
+
+            // CRUFT (should be removed): NotifBridge mirrors subtitles into FLGeneral popups.
+            // It was useful during investigation but adds noise/confusion now that we're
+            // standardizing on PlayerCharacter->ShowSubtitles as the sole mod feedback path.
+            if (doBridge)
+            {
+                // Avoid reflecting our own diagnostic tags back into popups.
+                const bool looksLikeModTagged = (msgStd.find("[PlayerSub:") != std::string::npos)
+                    || (msgStd.find("[SubActor]") != std::string::npos)
+                    || (msgStd.find("[FLGeneral:") != std::string::npos)
+                    || (msgStd.find("[Mod]") != std::string::npos);
+
+                static uint64_t lastTickMs = 0;
+                static std::string lastText;
+                const uint64_t now = TraceFileWriter::NowTickMs();
+
+                // Rate-limit: allow repeats if text changes, or every 750ms.
+                const bool shouldEmit = (!looksLikeModTagged)
+                    && (!msgStd.empty())
+                    && ((msgStd != lastText) || (lastTickMs == 0) || (now - lastTickMs >= 750));
+
+                if (shouldEmit)
+                {
+                    lastTickMs = now;
+                    lastText = msgStd;
+
+                    // CRUFT (should be removed): popup emission path.
+                    ScopedProcessEventGuard guard;
+                    SDK::FString popupMsg = MakeStableFString(WidenLossy(msgStd));
+                    SDK::UFLGeneral::ShowMessage(popupMsg, SDK::FString(L"Game"));
+
+                    // Decisive proof in the log (VR testing is expensive): show exactly what we mirrored.
+                    // Keep it rate-limited by the same gating as the popup emission.
+                    LOG_INFO("[NotifBridge] MIRROR inst=" << (int)inst << " dur=" << duration
+                                                        << " srcObj=" << object->GetFullName()
+                                                        << " srcFn=" << fnFull
+                                                        << " text='" << msgStd << "'");
+
+                    if (gNotifBridgePlaySound.load(std::memory_order_relaxed))
+                    {
+                        if (SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter())
+                        {
+                            if (player->RadioStartSound)
+                                Mod::ModFeedback::PlaySound2D(player->RadioStartSound, 0.9f, 1.35f, true);
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        bool Hook_LogShowMessage(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            // CRUFT (should be removed): legacy diagnostics for FLGeneral popup messages.
+            // Now that mod feedback is standardized on PlayerCharacter->ShowSubtitles, this is
+            // mostly historical and contributes to notification-related noise.
+            if (!gTraceEnabled.load(std::memory_order_relaxed))
+                return false;
+
+            if (!object || !function || !parms)
+                return false;
+
+            const std::string fnFull = function->GetFullName();
+            if (fnFull.find("FLGeneral.ShowMessage") == std::string::npos)
+                return false;
+
+            static int logs = 0;
+            if (logs >= 200)
+                return false;
+
+            auto* p = reinterpret_cast<FLGeneral_ShowMessage_Params*>(parms);
+            ++logs;
+            LOG_INFO("[NotifDiag] ShowMessage obj=" << object->GetFullName()
+                                                    << " fn=" << fnFull
+                                                    << " title='" << p->Title.ToString() << "'"
+                                                    << " msg='" << p->Message.ToString() << "'");
+            return false;
+        }
+
+        // Tablet discovery shared state (implemented below; declared here so hooks can call it).
+        static std::mutex& TabletMutexRef();
+        static std::string& LastHolsteredActorRef();
+        static std::string& LastHolsteredActorClassRef();
+
+        // Tablet discovery: log what actor is being holstered into the AutoReturnHolster slot.
+        // This is intended to identify the actual tablet actor class/widget chain for later UI integration.
+        bool Hook_SetHolsteredActor(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)function;
+            (void)originalFn;
+
+            if (!object || !parms)
+                return false;
+
+            if (!object->IsA(SDK::UBPC_AutoReturnHolster_C::StaticClass()))
+                return false;
+
+            auto* holster = static_cast<SDK::UBPC_AutoReturnHolster_C*>(object);
+            auto* params = reinterpret_cast<SetHolsteredActorParams*>(parms);
+
+            // Persist the most recent holstered actor so TCP commands can query it and
+            // tracing can be scoped by object name/class in a single VR test cycle.
+            if (params->ActorToHolster)
+            {
+                const std::string actorFull = params->ActorToHolster->GetFullName();
+                const std::string classFull = std::string("<unavailable>");
+                {
+                    std::lock_guard<std::mutex> lock(TabletMutexRef());
+                    LastHolsteredActorRef() = actorFull;
+                    LastHolsteredActorClassRef() = classFull;
+                }
+            }
+
+            static int logs = 0;
+            if (logs < 50)
+            {
+                ++logs;
+                const std::string ownerName = holster->GetOwner() ? holster->GetOwner()->GetFullName() : std::string("<null>");
+                const std::string actorName = params->ActorToHolster ? params->ActorToHolster->GetFullName() : std::string("<null>");
+                const std::string unloosableName = holster->UnloosableActor ? holster->UnloosableActor->GetFullName() : std::string("<null>");
+                LOG_INFO("[HookManager][TabletDiag] SetHolsteredActor: HolsterOwner=" << ownerName
+                                                                         << " ActorToHolster=" << actorName
+                                                                         << " UnloosableActor=" << unloosableName);
+            }
+
+            return false; // Never override; diagnostic only.
+        }
+
+        static void TabletInteraction_Record(const std::string& summary)
+        {
+            std::lock_guard<std::mutex> lock(gTabletInteractionMutex);
+            gLastTabletInteraction = summary;
+        }
+
+        // Tablet interactions: grip and UI delegates.
+        bool Hook_Tablet_OnGrip(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)parms;
+            (void)originalFn;
+
+            if (!gTabletInteractionDiagEnabled.load(std::memory_order_relaxed))
+                return false;
+            if (!object || !function)
+                return false;
+
+            const std::string objFull = object->GetFullName();
+            const std::string fnFull = function->GetFullName();
+
+            // Strong scoping to avoid logging every grippable object.
+            const bool isTablet = (objFull.find("BP_Tablet_C") != std::string::npos) || (fnFull.find("BP_Tablet_C") != std::string::npos);
+            if (!isTablet)
+                return false;
+
+            static int logs = 0;
+            if (logs < 300)
+            {
+                ++logs;
+                const std::string outer = (object->Outer ? object->Outer->GetFullName() : std::string("<null>"));
+                const std::string s = std::string("[TabletDiag] OnGrip obj=") + objFull + " outer=" + outer + " fn=" + fnFull;
+                LOG_INFO(s);
+                TabletInteraction_Record(s);
+            }
+            return false;
+        }
+
+        bool Hook_Tablet_OnGripRelease(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)parms;
+            (void)originalFn;
+
+            if (!gTabletInteractionDiagEnabled.load(std::memory_order_relaxed))
+                return false;
+            if (!object || !function)
+                return false;
+
+            const std::string objFull = object->GetFullName();
+            const std::string fnFull = function->GetFullName();
+            const bool isTablet = (objFull.find("BP_Tablet_C") != std::string::npos) || (fnFull.find("BP_Tablet_C") != std::string::npos);
+            if (!isTablet)
+                return false;
+
+            static int logs = 0;
+            if (logs < 300)
+            {
+                ++logs;
+                const std::string outer = (object->Outer ? object->Outer->GetFullName() : std::string("<null>"));
+                const std::string s = std::string("[TabletDiag] OnGripRelease obj=") + objFull + " outer=" + outer + " fn=" + fnFull;
+                LOG_INFO(s);
+                TabletInteraction_Record(s);
+            }
+            return false;
+        }
+
+        bool Hook_Tablet_UiDelegate(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)parms;
+            (void)originalFn;
+
+            if (!gTabletInteractionDiagEnabled.load(std::memory_order_relaxed))
+                return false;
+            if (!object || !function)
+                return false;
+
+            const std::string objFull = object->GetFullName();
+            const std::string fnFull = function->GetFullName();
+
+            // Scope to tablet UI widgets only.
+            const bool isTabletUi = (objFull.find("WBP_Tablet_UI") != std::string::npos)
+                || (objFull.find("Tablet") != std::string::npos)
+                || (fnFull.find("WBP_Tablet_UI") != std::string::npos);
+            if (!isTabletUi)
+                return false;
+
+            static int logs = 0;
+            if (logs < 400)
+            {
+                ++logs;
+                const std::string outer = (object->Outer ? object->Outer->GetFullName() : std::string("<null>"));
+                const std::string s = std::string("[TabletDiag] UiEvent obj=") + objFull + " outer=" + outer + " fn=" + fnFull;
+                LOG_INFO(s);
+                TabletInteraction_Record(s);
+            }
+            return false;
+        }
+
+        // Accessors for the function below (file-local by design).
+        static std::mutex& TabletMutexRef()
+        {
+            static std::mutex m;
+            return m;
+        }
+
+        static std::string& LastHolsteredActorRef()
+        {
+            static std::string s;
+            return s;
+        }
+
+        static std::string& LastHolsteredActorClassRef()
+        {
+            static std::string s;
+            return s;
+        }
+
     } // anonymous namespace
 
     // Static member initialization
@@ -470,6 +1210,133 @@ namespace Mod
     bool HookManager::GetReentryGuard()
     {
         return gProcessEventReentryGuard;
+    }
+
+    // ---------------------------------------------------------------------
+    // Diagnostics: ProcessEvent trace control API
+    // ---------------------------------------------------------------------
+    void HookManager::Trace_SetEnabled(bool enabled)
+    {
+        gTraceEnabled.store(enabled, std::memory_order_relaxed);
+
+        std::string fnFilter;
+        std::string objFilter;
+        {
+            std::lock_guard<std::mutex> lock(gTraceMutex);
+            fnFilter = gTraceFilterLower;
+            objFilter = gTraceObjectFilterLower;
+        }
+
+        gTraceFile.OnEnabledChanged(enabled, fnFilter, objFilter);
+
+        LOG_INFO("[Trace] TRACE " << (enabled ? "ENABLED" : "DISABLED")
+                                  << " path=" << gTraceFile.GetPathCopy()
+                                  << " fnFilter='" << fnFilter << "'"
+                                  << " objFilter='" << objFilter << "'");
+    }
+
+    bool HookManager::Trace_IsEnabled()
+    {
+        return gTraceEnabled.load(std::memory_order_relaxed);
+    }
+
+    void HookManager::Trace_SetFilter(const std::string& filterSubstringLower)
+    {
+        std::lock_guard<std::mutex> lock(gTraceMutex);
+        gTraceFilterLower = filterSubstringLower;
+        LOG_INFO("[Trace] Filter='" << gTraceFilterLower << "'");
+
+        // Marker for later correlation.
+        {
+            std::lock_guard<std::mutex> tlock(gTraceFile.Mutex);
+            std::ostringstream details;
+            details << "\"fnFilter\":\"" << TraceFileWriter::JsonEscape(gTraceFilterLower) << "\"";
+            gTraceFile.WriteMarkerLocked("TRACE_FILTER", details.str());
+        }
+    }
+
+    void HookManager::Trace_SetObjectFilter(const std::string& filterSubstringLower)
+    {
+        std::lock_guard<std::mutex> lock(gTraceMutex);
+        gTraceObjectFilterLower = filterSubstringLower;
+        LOG_INFO("[Trace] ObjectFilter='" << gTraceObjectFilterLower << "'");
+
+        {
+            std::lock_guard<std::mutex> tlock(gTraceFile.Mutex);
+            std::ostringstream details;
+            details << "\"objFilter\":\"" << TraceFileWriter::JsonEscape(gTraceObjectFilterLower) << "\"";
+            gTraceFile.WriteMarkerLocked("TRACE_OBJECT_FILTER", details.str());
+        }
+    }
+
+    void HookManager::Trace_Reset()
+    {
+        TraceReset();
+        LOG_INFO("[Trace] Reset");
+
+        gTraceFile.ResetFile();
+    }
+
+    std::string HookManager::Trace_Dump(int topN, int lastN)
+    {
+        return TraceDumpSummary(topN, lastN);
+    }
+
+    void HookManager::Trace_Flush()
+    {
+        gTraceFile.Flush();
+        LOG_INFO("[Trace] Flush requested");
+    }
+
+    std::string HookManager::Trace_GetFilePath()
+    {
+        return gTraceFile.GetPathCopy();
+    }
+
+    std::string HookManager::TabletDiag_GetLastHolsteredSummary()
+    {
+        std::lock_guard<std::mutex> lock(TabletMutexRef());
+        const std::string& actor = LastHolsteredActorRef();
+        const std::string& cls = LastHolsteredActorClassRef();
+        if (actor.empty() && cls.empty())
+            return "tablet_last: <none>";
+        return std::string("tablet_last: actor=") + actor + " class=" + cls;
+    }
+
+    void HookManager::TabletDiag_SetEnabled(bool enabled)
+    {
+        gTabletInteractionDiagEnabled.store(enabled, std::memory_order_relaxed);
+        LOG_INFO("[HookManager][TabletDiag] Interaction diag " << (enabled ? "ENABLED" : "DISABLED"));
+    }
+
+    bool HookManager::TabletDiag_IsEnabled()
+    {
+        return gTabletInteractionDiagEnabled.load(std::memory_order_relaxed);
+    }
+
+    std::string HookManager::TabletDiag_GetLastInteractionSummary()
+    {
+        std::lock_guard<std::mutex> lock(gTabletInteractionMutex);
+        if (gLastTabletInteraction.empty())
+            return "tablet_diag_last: <none>";
+        return std::string("tablet_diag_last: ") + gLastTabletInteraction;
+    }
+
+    void HookManager::NotifBridge_SetEnabled(bool enabled, bool playSound)
+    {
+        gNotifBridgeEnabled.store(enabled, std::memory_order_relaxed);
+        gNotifBridgePlaySound.store(playSound, std::memory_order_relaxed);
+        LOG_INFO("[HookManager][NotifBridge] " << (enabled ? "ENABLED" : "DISABLED") << " playSound=" << (playSound ? "true" : "false"));
+    }
+
+    bool HookManager::NotifBridge_IsEnabled()
+    {
+        return gNotifBridgeEnabled.load(std::memory_order_relaxed);
+    }
+
+    bool HookManager::NotifBridge_IsPlaySoundEnabled()
+    {
+        return gNotifBridgePlaySound.load(std::memory_order_relaxed);
     }
 
     bool HookManager::Initialize()
@@ -515,11 +1382,25 @@ namespace Mod
         namedHooks_["ChangeDurability"] = &Hook_DurabilityNoOp;
 
         // Arena behavior
-        // namedHooks_["RequestAttackRole"] = &Hook_RequestAttackRole;
+        namedHooks_["RequestAttackRole"] = &Hook_RequestAttackRole;
 
         // Player statsx
         namedHooks_["ChangeHungerAndNotifyAll"] = &Hook_ChangeHunger;
         namedHooks_["ChangeStaminaAndNotifyAll"] = &Hook_ChangeStamina;
+
+        // Tablet discovery (diagnostic only)
+        namedHooks_["SetHolsteredActor"] = &Hook_SetHolsteredActor;
+
+        // Tablet interaction diagnostics (toggleable via TCP)
+        namedHooks_["OnGrip"] = &Hook_Tablet_OnGrip;
+        namedHooks_["OnGripRelease"] = &Hook_Tablet_OnGripRelease;
+        namedHooks_["OnButtonPressedEvent__DelegateSignature"] = &Hook_Tablet_UiDelegate;
+        namedHooks_["OnClick_ZoomPlus__DelegateSignature"] = &Hook_Tablet_UiDelegate;
+        namedHooks_["OnClick_ZoomMinus__DelegateSignature"] = &Hook_Tablet_UiDelegate;
+
+        // Notification discovery (trace-gated; helps identify the "safety is on" path)
+        namedHooks_["ShowSubtitles"] = &Hook_LogShowSubtitles;
+        namedHooks_["ShowMessage"] = &Hook_LogShowMessage;
 
         // Build snapshot for lock-free ProcessEvent dispatch
         namedHooksSnapshot_ = namedHooks_;
@@ -778,6 +1659,13 @@ namespace Mod
             return;
         }
 
+        // Diagnostics trace (data-collection mode). Keep it extremely cheap when disabled.
+        // Skip tracing during reentry-guarded calls to reduce self-noise.
+        if (!gProcessEventReentryGuard)
+        {
+            TraceOnProcessEvent(pThis, function);
+        }
+
         if (gProcessEventReentryGuard)
         {
             originalFn(pThis, function, parms);
@@ -812,12 +1700,39 @@ namespace Mod
         std::shared_lock<std::shared_mutex> lock(mgr.mutex_);
         const bool hasNamedHooks = !mgr.namedHooksSnapshot_.empty();
 
-        // Fast-path: if no gameplay hooks and no named hooks are active, skip all string work.
-        if (!hasGameplayHooks && !hasNamedHooks)
+        const bool traceEnabled = gTraceEnabled.load(std::memory_order_relaxed);
+
+        // Fast-path: if no gameplay hooks, no named hooks, and trace is off, skip all string work.
+        if (!hasGameplayHooks && !hasNamedHooks && !traceEnabled)
         {
             lock.unlock(); // Release lock before calling original
             originalFn(pThis, function, parms);
             return;
+        }
+
+        // Tablet UI interaction discovery: we cannot rely on knowing every exact delegate name up-front.
+        // When enabled, log any *tablet-scoped* delegate signature events as a catch-all.
+        if (gTabletInteractionDiagEnabled.load(std::memory_order_relaxed) && pThis)
+        {
+            const std::string fnName = function->GetName();
+            if (fnName.find("DelegateSignature") != std::string::npos)
+            {
+                const std::string objFull = pThis->GetFullName();
+                if (objFull.find("Tablet") != std::string::npos)
+                {
+                    static uint64_t lastMs = 0;
+                    const uint64_t nowMs = TraceFileWriter::NowTickMs();
+                    if (lastMs == 0 || nowMs - lastMs >= 150)
+                    {
+                        lastMs = nowMs;
+                        const std::string fnFull = function->GetFullName();
+                        const std::string outer = (pThis->Outer ? pThis->Outer->GetFullName() : std::string("<null>"));
+                        const std::string s = std::string("[TabletDiag] UiDelegate obj=") + objFull + " outer=" + outer + " fn=" + fnFull;
+                        LOG_INFO(s);
+                        TabletInteraction_Record(s);
+                    }
+                }
+            }
         }
 
         // Check cache first (Lock-protected or shared_locked)

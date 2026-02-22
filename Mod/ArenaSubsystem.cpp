@@ -46,6 +46,7 @@ AILEARNINGS
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <unordered_set>
 
 namespace Mod::Arena
 {
@@ -250,7 +251,16 @@ namespace Mod::Arena
                 LOG_WARN("[Arena] Detected old NPC list format (short names). Clearing invalid entries and saving.");
                 if (!discoveredNPCs_.empty())
                 {
-                    SaveNPCList();
+                    // We want to drop short-name entries from the file, so rewrite it directly
+                    std::ofstream outfile("npcs.txt", std::ios::trunc);
+                    if (outfile.is_open())
+                    {
+                        for (const auto& name : discoveredNPCs_)
+                        {
+                            outfile << name << "\n";
+                        }
+                        outfile.close();
+                    }
                 }
             }
             
@@ -280,16 +290,56 @@ namespace Mod::Arena
 
     void ArenaSubsystem::SaveNPCList()
     {
-        if (discoveredNPCs_.empty())
+        std::vector<std::string> snapshot;
+        {
+            std::lock_guard<std::recursive_mutex> lock(discoveredNPCsMutex_);
+            snapshot = discoveredNPCs_;
+        }
+
+        if (snapshot.empty())
         {
             LOG_INFO("[Arena] Skip saving npcs.txt (no discovered NPCs)");
             return;
         }
 
+        // Read existing entries so we can merge without losing anything that might
+        // no longer be present in discoveredNPCs_ for whatever reason.  The goal is
+        // to treat the file as an append-only history of every unique NPC path
+        // we've ever seen.
+        std::unordered_set<std::string> allNPCs;
+        {
+            std::ifstream infile("npcs.txt");
+            std::string line;
+            while (std::getline(infile, line))
+            {
+                if (!line.empty())
+                {
+                    allNPCs.insert(line);
+                }
+            }
+        }
+
+        bool addedAny = false;
+        for (const auto& name : snapshot)
+        {
+            if (allNPCs.insert(name).second)
+            {
+                addedAny = true; // this was a new NPC we haven't persisted yet
+            }
+        }
+
+        if (!addedAny)
+        {
+            LOG_INFO("[Arena] npcs.txt already up to date");
+            return;
+        }
+
+        // Rewrite the file with the merged set.  We truncate and dump the union so
+        // that we don't accidentally grow the file with duplicates when appending.
         std::ofstream file("npcs.txt", std::ios::trunc);
         if (file.is_open())
         {
-            for (const auto& name : discoveredNPCs_)
+            for (const auto& name : allNPCs)
             {
                 file << name << "\n";
             }
@@ -835,7 +885,20 @@ namespace Mod::Arena
 
         float time = SDK::UGameplayStatics::GetTimeSeconds(world);
         // Stagger pre-spawning over the cooldown window
-        float spawnInterval = (Mod::Tuning::kArenaWaveCooldownSeconds - 0.5f) / static_cast<float>(enemiesPerWave_ > 0 ? enemiesPerWave_ : 10);
+        // Spread the pre-spawns across a period that is derived from both the
+        // arena cooldown and the number of enemies we intend to spawn.  Previously
+        // we subtracted a fixed 0.5f which caused the total pre‑spawn window to
+        // always equal the cooldown; for very large waves that meant the user had
+        // to wait the full cooldown before all pre‑spawns finished.  By making the
+        // interval a direct function of the count we can shrink the window when the
+        // wave is big (more enemies => smaller spacing).
+        float spawnInterval = Mod::Tuning::kArenaWaveCooldownSeconds /
+            static_cast<float>(enemiesPerWave_ > 0 ? enemiesPerWave_ : 1);
+
+        // Never let it get dangerously small; this avoids hammering SpawnOneNPC in
+        // case of extreme enemy counts.
+        if (spawnInterval < Mod::Tuning::kArenaMinPreSpawnInterval)
+            spawnInterval = Mod::Tuning::kArenaMinPreSpawnInterval;
         
         if (time - lastPreSpawnTime_ > spawnInterval)
         {
@@ -1024,6 +1087,15 @@ namespace Mod::Arena
     {
         float time = SDK::UGameplayStatics::GetTimeSeconds(world);
         if (time - waveStartTime_ < Mod::Tuning::kArenaProximityNoticeStartSeconds) return;
+
+        // Only bother when the enemy count is already low (<3); otherwise the
+        // player shouldn't be spammed with distance notices.
+        {
+            std::lock_guard<std::recursive_mutex> lock(activeEnemiesMutex_);
+            if (activeEnemies_.size() >= 3) return;
+            if (activeEnemies_.empty()) return;
+        }
+
         if (time - lastProximityNoticeTime_ < Mod::Tuning::kArenaProximityNoticeIntervalSeconds) return;
 
         SDK::APawn* player = Mod::GameContext::GetPlayerPawn(world);
@@ -1034,8 +1106,6 @@ namespace Mod::Arena
         
         {
             std::lock_guard<std::recursive_mutex> lock(activeEnemiesMutex_);
-            if (activeEnemies_.empty()) return;
-
             for (auto* actor : activeEnemies_)
             {
                 if (!actor) continue;
@@ -1101,9 +1171,15 @@ namespace Mod::Arena
 
         if (found)
         {
-            wchar_t msg[64]{};
-            _snwprintf_s(msg, _TRUNCATE, L"Kill! Enemies left: %d", (int)remaining);
-            Mod::ModFeedback::ShowMessage(msg, 1.5f, SDK::FLinearColor{1.0f, 0.2f, 0.2f, 1.0f});
+            // Only display a kill/remaining message at 5‑enemy intervals or when the
+            // count has dropped into the final 3.  This cuts down on spam while still
+            // giving the player a sense of progress.
+            if (remaining <= 3 || (remaining % 5) == 0)
+            {
+                wchar_t msg[64]{};
+                _snwprintf_s(msg, _TRUNCATE, L"Kill! Enemies left: %d", (int)remaining);
+                Mod::ModFeedback::ShowMessage(msg, 1.5f, SDK::FLinearColor{1.0f, 0.2f, 0.2f, 1.0f});
+            }
 
             if (remaining == 0 && enemiesToSpawn_ == 0)
             {

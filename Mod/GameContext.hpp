@@ -23,3 +23,4 @@ namespace Mod::GameContext
     // Clears cached references (e.g. on level change)
     void ClearCache();
 }
+

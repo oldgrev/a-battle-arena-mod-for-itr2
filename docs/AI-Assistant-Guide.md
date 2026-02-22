@@ -4,7 +4,7 @@
 
 This repo is a VR game mod for **Into The Radius 2 (UE 5.5)** built on a Dumper-7 generated SDK. The modding SDK has been dumped from the game "Into the Radius 2", which is a VR title. The mod is built as a DLL that replaces the original version.dll, allowing us to inject custom code and modify game behavior at runtime.
 
-VR GAMES ARE HARD TO TEST, DON'T WASTE TIME ON SMALL, NON-DETERMINATIVE CHANGES. When in doubt, add logs and make bigger changes that can conclusively confirm or refute a hypothesis in one VR test cycle.s
+VR GAMES ARE HARD TO TEST, DON'T WASTE TIME ON SMALL, NON-DETERMINATIVE CHANGES. When in doubt, add logs and make bigger changes that can conclusively confirm or refute a hypothesis in one VR test cycle.
 
 **CRITICAL REQUIREMENT: AILEARNINGS BLOCKS**
 ALWAYS ADD LEARNINGS TO THE TOP OF THE CPP FILES IMMEDIATELY AFTER FIXING A CRASH OR COMPILATION ERROR. This allows future AI assistants to quickly orient themselves. 
@@ -56,6 +56,48 @@ Most gameplay logic in ITR2 is Blueprint/reflection driven. Hooking **`UObject::
 4. **Use `ModFeedback`**: When a cheat or command is triggered, use `Mod::ModFeedback::ShowMessage` to give visual confirmation in the headset.
 5. **GObjects Access**: `SDK::UObject::GObjects` is a `TUObjectArrayWrapper`. Use `->` (e.g., `GObjects->Num()`) to access the underlying `TUObjectArray`. Using `.` will cause a compilation error as `Num()` is not a member of the wrapper itself.
 6. **Header Forward Declarations**: When using SDK types in mod headers (like `ModMain.hpp`), use forward declarations (e.g., `namespace SDK { class UWorld; }`) instead of including large SDK headers to avoid circular dependencies and slow compile times.
+
+### Session Discipline (don’t go off the rails)
+
+These are process rules. They are here because VR testing is expensive and assistant drift wastes time.
+
+1. **Do exactly what the user asked**: If the request is “verify MCP server”, do not edit unrelated gameplay/mod files. If extra work seems useful, ask first.
+2. **Do not reinterpret instructions**: The user’s chat instructions + this guide are the authoritative sources. Don’t “improve” the plan by silently changing semantics.
+3. **Clarify ambiguous persistence**: If you propose “avoid disk spam”, explicitly state whether trace data is persisted to disk, streamed over TCP, or only kept in-memory.
+4. **Never deliver only a trace summary**: A summary is supplemental. When tracing is requested, provide a way to retrieve the *full underlying events*.
+5. **Be explicit about tool capability**: If MCP tools exist in the environment, use them. Don’t claim you can’t if you can.
+
+### Trace Logging (non-negotiable requirements)
+
+When implementing any “trace” / “trace all” / “log literally everything” mode, follow these rules:
+
+1. **Full data must be retrievable**
+  - A trace mode that only increments counters or outputs a summary is *not* sufficient.
+  - Provide a way to retrieve the *full event stream* captured during the trace window.
+
+2. **Persistence must match the ask**
+  - If the user asks for a “full trace log”, the trace must be persisted (disk file and/or streamed over TCP) in a way that survives a crash.
+  - “Avoid disk spam” means batching, throttling, compression, or a dedicated trace file — it does *not* mean “don’t write trace events at all”.
+
+3. **Crash survivability**
+  - If tracing is used to diagnose crashes, in-memory-only buffers are insufficient by themselves.
+  - Use one of:
+    - (Preferred) write append-only trace batches to a separate trace file (e.g. `itr2_trace.log`) with explicit flush points
+    - Stream trace events out over TCP/UDP to an external collector
+    - Or both
+
+4. **User-controlled scope**
+  - Tracing must be toggleable and scoping/filtering must be available (e.g. by function name prefix).
+  - Provide commands that: enable, disable, reset, dump-full, and (optionally) dump-summary.
+  - If performance impact is acceptable while enabled, bias toward completeness.
+
+5. **Output format**
+  - Each event should include at least: timestamp, thread id, function name, object name/class (if available), and a stable way to reconstruct ordering.
+  - If you add a ring buffer, it’s fine for speed — but it must not be the *only* place the data exists when “full trace log” is required.
+
+6. **If you change behavior, prove it in the log**
+  - Add an unmistakable “TRACE ENABLED” / “TRACE DISABLED” log line (and where it’s writing to).
+  - Add build/version stamping where needed so users can verify the running DLL matches the compiled code.
 
 ## Where to edit
 

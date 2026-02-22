@@ -112,6 +112,36 @@ namespace Mod
         static void SetReentryGuard(bool enabled);
         static bool GetReentryGuard();
 
+        // -----------------------------------------------------------------
+        // Diagnostics: ProcessEvent trace (data collection)
+        // -----------------------------------------------------------------
+        static void Trace_SetEnabled(bool enabled);
+        static bool Trace_IsEnabled();
+        static void Trace_SetFilter(const std::string& filterSubstringLower);
+        static void Trace_SetObjectFilter(const std::string& filterSubstringLower);
+        static void Trace_Reset();
+        static std::string Trace_Dump(int topN = 30, int lastN = 50);
+        static void Trace_Flush();
+        static std::string Trace_GetFilePath();
+
+        // -----------------------------------------------------------------
+        // Diagnostics: Tablet discovery
+        // -----------------------------------------------------------------
+        static std::string TabletDiag_GetLastHolsteredSummary();
+
+        // Tablet interaction diagnostics (grip + UI delegates). Toggleable to avoid noise.
+        static void TabletDiag_SetEnabled(bool enabled);
+        static bool TabletDiag_IsEnabled();
+        static std::string TabletDiag_GetLastInteractionSummary();
+
+        // -----------------------------------------------------------------
+        // Diagnostics: Notification bridge
+        // -----------------------------------------------------------------
+        // Mirrors game-generated subtitles into VR-visible popup + optional sound.
+        static void NotifBridge_SetEnabled(bool enabled, bool playSound);
+        static bool NotifBridge_IsEnabled();
+        static bool NotifBridge_IsPlaySoundEnabled();
+
     private:
         HookManager();
         ~HookManager();

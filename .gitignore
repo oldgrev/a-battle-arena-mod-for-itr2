@@ -12,6 +12,7 @@
 *.exe
 *.out
 *.app
+*.py
 
 *.gch
 *.pch
@@ -19,6 +20,10 @@
 *.idb
 *.pdb
 *.ilk
+
+*.pyc
+requirements*.txt
+trace_filters.json
 
 *.db
 *.tlog

@@ -26,6 +26,7 @@ AILEARNINGS
 #include <chrono>
 #include <iomanip>
 #include <set>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -818,158 +819,6 @@ namespace Mod::Loadout
         return true;
     }
     
-    std::string LoadoutSubsystem::ApplyLoadout(SDK::UWorld* world, const std::string& loadoutName)
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        
-        if (loadoutName.empty())
-        {
-            return "Error: Loadout name cannot be empty";
-        }
-        
-        if (!world)
-        {
-            return "Error: World not ready";
-        }
-        
-        LOG_INFO("[Loadout] Applying loadout: " << loadoutName);
-        
-        // Load the loadout file
-        LoadoutData loadout;
-        if (!LoadLoadoutFromFile(loadoutName, loadout))
-        {
-            return "Error: Failed to load loadout file '" + loadoutName + "'";
-        }
-        
-        LOG_INFO("[Loadout] Loaded " << loadout.items.size() << " items from loadout");
-        
-        // Get player character for spawn location reference
-        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
-        if (!playerPawn)
-        {
-            return "Error: Player pawn not found";
-        }
-        
-        // Spawn each item
-        int spawnedCount = 0;
-        int failedCount = 0;
-        
-        for (const auto& item : loadout.items)
-        {
-            if (SpawnItemFromLoadout(world, item, ""))
-            {
-                spawnedCount++;
-            }
-            else
-            {
-                failedCount++;
-            }
-        }
-        
-        std::ostringstream result;
-        result << "Applied loadout '" << loadoutName << "': " << spawnedCount << " spawned";
-        if (failedCount > 0)
-        {
-            result << ", " << failedCount << " failed";
-        }
-        
-        // Show in-game feedback
-        ModFeedback::ShowMessage(
-            (L"Loadout applied: " + std::wstring(loadoutName.begin(), loadoutName.end())).c_str(),
-            3.0f,
-            SDK::FLinearColor{0.5f, 1.0f, 0.0f, 1.0f});
-        
-        return result.str();
-    }
-    
-    bool LoadoutSubsystem::SpawnItemFromLoadout(SDK::UWorld* world, const LoadoutItem& item, const std::string& parentContainer)
-    {
-        if (item.itemTypeTag.empty())
-        {
-            LOG_ERROR("[Loadout] Item has empty type tag");
-            return false;
-        }
-        
-        LOG_INFO("[Loadout] Spawning item: " << item.itemTypeTag);
-        
-        // Create FGameplayTag from the tag string
-        // Convert to wide string, then use SDK helper to get FName from string table
-        std::wstring wideTag = ToWideString(item.itemTypeTag);
-        SDK::FGameplayTag typeTag;
-        typeTag.TagName = SDK::BasicFilesImpleUtils::StringToName(wideTag.c_str());
-        
-        // Create spawn transform
-        SDK::FVector location{item.transform.posX, item.transform.posY, item.transform.posZ};
-        SDK::FRotator rotation{item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll};
-        SDK::FVector scale{item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ};
-        
-        // If this is a top-level item, spawn in front of player
-        if (parentContainer.empty())
-        {
-            SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
-            if (playerPawn)
-            {
-                SDK::FVector playerLoc = playerPawn->K2_GetActorLocation();
-                SDK::FRotator playerRot = playerPawn->K2_GetActorRotation();
-                SDK::FVector forward = SDK::UKismetMathLibrary::GetForwardVector(playerRot);
-                
-                // Spawn 150cm in front of player, at waist height
-                location.X = playerLoc.X + forward.X * 150.0f;
-                location.Y = playerLoc.Y + forward.Y * 150.0f;
-                location.Z = playerLoc.Z + 50.0f; // Slightly above ground
-            }
-        }
-        
-        SDK::FTransform spawnTransform = SDK::UKismetMathLibrary::MakeTransform(location, rotation, scale);
-        
-        // Create item configuration
-        SDK::FItemConfiguration itemConfig{};
-        itemConfig.bShopItem = false;
-        itemConfig.StartDurabilityRatio = item.durability;
-        itemConfig.StackAmount = 1;
-        
-        // Set up stacked items for magazines
-        // Note: This may need to be done differently - the magazine contents
-        // might need to be set after spawning using AddAdditionalData or similar
-        
-        // Spawn the item
-        try
-        {
-            SDK::AActor* spawnedActor = SDK::UFLSpawn::SpawnItemByTypeTag(
-                world,
-                typeTag,
-                spawnTransform,
-                itemConfig,
-                true // bCreateDynamicData
-            );
-            
-            if (!spawnedActor)
-            {
-                LOG_ERROR("[Loadout] Failed to spawn item: " << item.itemTypeTag);
-                return false;
-            }
-            
-            LOG_INFO("[Loadout] Successfully spawned: " << spawnedActor->GetName());
-            
-            // Handle attachments
-            // Note: Attachments may need to be spawned and then attached programmatically
-            // This might require using the item's container interface
-            for (const auto& attachment : item.attachments)
-            {
-                // For now, just spawn attachments near the parent
-                // Full attachment handling would require more complex logic
-                SpawnItemFromLoadout(world, attachment, item.instanceUid);
-            }
-            
-            return true;
-        }
-        catch (const std::exception& e)
-        {
-            LOG_ERROR("[Loadout] Exception spawning item: " << e.what());
-            return false;
-        }
-    }
-    
     std::string LoadoutSubsystem::ListLoadouts() const
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1034,5 +883,673 @@ namespace Mod::Loadout
     {
         std::string filepath = GetLoadoutFilePath(name);
         return fs::exists(filepath);
+    }
+    
+    bool LoadoutSubsystem::BackupCurrentLoadout(SDK::UWorld* world)
+    {
+        LOG_INFO("[Loadout] Backing up current loadout...");
+        
+        // Use a special name for the backup
+        std::string result = CaptureLoadout(world, "_backup");
+        
+        bool success = result.find("Error") == std::string::npos;
+        if (success)
+        {
+            LOG_INFO("[Loadout] Backup successful");
+        }
+        else
+        {
+            LOG_ERROR("[Loadout] Backup failed: " << result);
+        }
+        
+        return success;
+    }
+    
+    int LoadoutSubsystem::ClearPlayerLoadout(SDK::UWorld* world)
+    {
+        LOG_INFO("[Loadout] Clearing player loadout...");
+        
+        if (!world)
+        {
+            LOG_ERROR("[Loadout] ClearPlayerLoadout: World is null");
+            return 0;
+        }
+        
+        SDK::URadiusContainerSubsystem* containerSubsystem = GetContainerSubsystem(world);
+        if (!containerSubsystem)
+        {
+            LOG_ERROR("[Loadout] ClearPlayerLoadout: Container subsystem not found");
+            return 0;
+        }
+        
+        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+        if (!playerPawn)
+        {
+            LOG_ERROR("[Loadout] ClearPlayerLoadout: Player pawn not found");
+            return 0;
+        }
+        
+        int droppedCount = 0;
+        
+        // Get all player items
+        SDK::TArray<SDK::ARadiusItemBase*> playerItems;
+        if (containerSubsystem->GetAllPlayerItems(playerPawn, &playerItems))
+        {
+            LOG_INFO("[Loadout] Found " << playerItems.Num() << " items to clear");
+            
+            // Destroy each item
+            for (int i = 0; i < playerItems.Num(); i++)
+            {
+                SDK::ARadiusItemBase* item = playerItems[i];
+                if (item)
+                {
+                    try
+                    {
+                        // Destroy the actor
+                        item->K2_DestroyActor();
+                        droppedCount++;
+                    }
+                    catch (...)
+                    {
+                        LOG_WARN("[Loadout] Failed to destroy item at index " << i);
+                    }
+                }
+            }
+        }
+        
+        LOG_INFO("[Loadout] Cleared " << droppedCount << " items");
+        return droppedCount;
+    }
+    
+    // ---------------------------------------------------------------------------
+    // ParseParentUid
+    //
+    // Splits a parent container UID into (baseItemUid, slotSuffix).
+    //
+    // Examples:
+    //   "Item.Equipment.Vests.Modular.Classic.Sand-4-AttachSlot.ModularVest.Slot18"
+    //     -> {"Item.Equipment.Vests.Modular.Classic.Sand-4", "AttachSlot.ModularVest.Slot18"}
+    //
+    //   "Item.Magazine.AK-74.Red-5922-AttachSlot.Magazine"
+    //     -> {"Item.Magazine.AK-74.Red-5922", "AttachSlot.Magazine"}
+    //
+    //   "Player-Holster.Player.Vest"
+    //     -> {"", "Player-Holster.Player.Vest"}   (player slot, no base item)
+    // ---------------------------------------------------------------------------
+    static std::pair<std::string, std::string> ParseParentUid(const std::string& parentUid)
+    {
+        // Player slot UIDs start with "Player-"
+        if (parentUid.size() >= 7 && parentUid.substr(0, 7) == "Player-")
+        {
+            return {"", parentUid};
+        }
+
+        // Scan for the RIGHTMOST "-digits-" pattern.
+        // The split point is the hyphen that follows the digit run.
+        // e.g. "Foo-4-Bar" -> split after "-4", at the second hyphen.
+        size_t splitPos = std::string::npos;
+
+        for (size_t i = 0; i < parentUid.size(); i++)
+        {
+            if (parentUid[i] == '-')
+            {
+                // Check how many digits follow
+                size_t j = i + 1;
+                while (j < parentUid.size() && std::isdigit((unsigned char)parentUid[j]))
+                {
+                    j++;
+                }
+                // We need at least one digit, followed by another '-'
+                if (j > i + 1 && j < parentUid.size() && parentUid[j] == '-')
+                {
+                    splitPos = j; // The second hyphen is the split boundary
+                }
+            }
+        }
+
+        if (splitPos != std::string::npos)
+        {
+            return {
+                parentUid.substr(0, splitPos),      // e.g. "Item.Foo-4"
+                parentUid.substr(splitPos + 1)       // e.g. "AttachSlot.Bar"
+            };
+        }
+
+        // Couldn't find the pattern - treat the whole thing as a base UID
+        return {parentUid, ""};
+    }
+
+    // ---------------------------------------------------------------------------
+    // SnapshotInventory  -  returns the set of all current player item UIDs.
+    // ---------------------------------------------------------------------------
+    static std::set<std::string> SnapshotInventory(SDK::URadiusContainerSubsystem* cs)
+    {
+        std::set<std::string> snap;
+        try
+        {
+            auto items = cs->GetPlayersInventory();
+            for (int i = 0; i < items.Num(); i++)
+            {
+                if (items[i])
+                {
+                    snap.insert(items[i]->InstanceUid.ToString());
+                }
+            }
+        }
+        catch (...) {}
+        return snap;
+    }
+
+    // ---------------------------------------------------------------------------
+    // SpawnItem  -  spawns an item in the world (does NOT attach it).
+    //              Item is placed slightly in front of the player so
+    //              it doesn't immediately clip into geometry.
+    // ---------------------------------------------------------------------------
+    static SDK::AActor* SpawnItem(SDK::UWorld* world, const LoadoutItem& item)
+    {
+        if (item.itemTypeTag.empty())
+        {
+            LOG_ERROR("[Loadout] SpawnItem: Empty type tag");
+            return nullptr;
+        }
+
+        std::wstring wideTag = ToWideString(item.itemTypeTag);
+        SDK::FGameplayTag typeTag;
+        typeTag.TagName = SDK::BasicFilesImpleUtils::StringToName(wideTag.c_str());
+
+        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+        SDK::FVector loc{0, 0, 0};
+        SDK::FRotator rot{0, 0, 0};
+        SDK::FVector scale{1, 1, 1};
+
+        if (playerPawn)
+        {
+            SDK::FVector pLoc = playerPawn->K2_GetActorLocation();
+            SDK::FRotator pRot = playerPawn->K2_GetActorRotation();
+            SDK::FVector fwd = SDK::UKismetMathLibrary::GetForwardVector(pRot);
+            // Place 100 cm ahead, 10 cm above feet - keeps it accessible if attach fails
+            loc.X = pLoc.X + fwd.X * 100.0f;
+            loc.Y = pLoc.Y + fwd.Y * 100.0f;
+            loc.Z = pLoc.Z + 10.0f;
+        }
+
+        SDK::FTransform spawnTransform = SDK::UKismetMathLibrary::MakeTransform(loc, rot, scale);
+
+        SDK::FItemConfiguration cfg{};
+        cfg.bShopItem = false;
+        cfg.StartDurabilityRatio = item.durability;
+        cfg.StackAmount = 1;
+
+        try
+        {
+            SDK::AActor* actor = SDK::UFLSpawn::SpawnItemByTypeTag(
+                world, typeTag, spawnTransform, cfg, true);
+
+            if (actor)
+            {
+                LOG_INFO("[Loadout] Spawned: " << actor->GetName()
+                         << "  type=" << item.itemTypeTag);
+            }
+            else
+            {
+                LOG_ERROR("[Loadout] SpawnItemByTypeTag returned null for: " << item.itemTypeTag);
+            }
+            return actor;
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Loadout] Exception spawning " << item.itemTypeTag << ": " << e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("[Loadout] Unknown exception spawning " << item.itemTypeTag);
+        }
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------------------------
+    // AttachToContainer  -  tries InstantHolsterActor then PutItemToContainer.
+    // ---------------------------------------------------------------------------
+    // Attach an actor to a container, optionally providing a relative transform.
+    // If the container implements IItemContainerInterface the 3‑arg overload is
+    // used to ensure the transform is applied; otherwise the world-subsystem
+    // fallback is attempted and ignores the transform.
+    static bool AttachToContainer(SDK::URadiusContainerSubsystem* cs,
+                                  SDK::UObject* container,
+                                  SDK::AActor* actor,
+                                  const std::string& label)
+    {
+        if (!container || !actor)
+        {
+            LOG_WARN("[Loadout] AttachToContainer: null container or actor for " << label);
+            return false;
+        }
+
+        try
+        {
+            cs->InstantHolsterActor(container, actor);
+            LOG_INFO("[Loadout] Attached via InstantHolsterActor: " << label);
+            return true;
+        }
+        catch (const std::exception& e)
+        {
+            LOG_WARN("[Loadout] InstantHolsterActor failed for " << label << ": " << e.what());
+        }
+        catch (...)
+        {
+            LOG_WARN("[Loadout] InstantHolsterActor threw for " << label);
+        }
+
+        try
+        {
+            bool ok = cs->PutItemToContainer(container, actor);
+            if (ok)
+            {
+                LOG_INFO("[Loadout] Attached via PutItemToContainer: " << label);
+            }
+            else
+            {
+                LOG_WARN("[Loadout] PutItemToContainer returned false for: " << label);
+            }
+            return ok;
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Loadout] PutItemToContainer threw for " << label << ": " << e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("[Loadout] PutItemToContainer threw for " << label);
+        }
+        return false;
+    }
+
+    // ---------------------------------------------------------------------------
+    // GetPlayerBodySlotContainer
+    //
+    // Maps a "Player-Holster.Player.XXX" UID to the actual player component.
+    // Returns nullptr for unknown or intentionally-skipped slots (Tablet).
+    // ---------------------------------------------------------------------------
+    SDK::UObject* LoadoutSubsystem::GetPlayerBodySlotContainer(SDK::UWorld* world,
+                                                               const std::string& parentContainerUid)
+    {
+        LOG_INFO("[Loadout] Looking up player body slot for: " << parentContainerUid);
+
+        // Tablet slot - we intentionally skip the tablet
+        if (parentContainerUid.find("Tablet") != std::string::npos)
+        {
+            LOG_INFO("[Loadout] Skipping Tablet slot");
+            return nullptr;
+        }
+
+        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+        if (!playerPawn)
+        {
+            LOG_ERROR("[Loadout] GetPlayerBodySlotContainer: No player pawn");
+            return nullptr;
+        }
+
+        auto* playerChar = static_cast<SDK::ABP_RadiusPlayerCharacter_Gameplay_C*>(playerPawn);
+
+        try
+        {
+            if (parentContainerUid.find(".Vest") != std::string::npos)
+            {
+                LOG_INFO("[Loadout] -> BPC_Vest_Slot");
+                return playerChar->BPC_Vest_Slot;
+            }
+            if (parentContainerUid.find(".Head") != std::string::npos ||
+                parentContainerUid.find("Helmet") != std::string::npos)
+            {
+                LOG_INFO("[Loadout] -> BPC_Head_Slot");
+                return playerChar->BPC_Head_Slot;
+            }
+            if (parentContainerUid.find(".Backpack") != std::string::npos)
+            {
+                LOG_INFO("[Loadout] -> BPC_BackpackHolster");
+                return playerChar->BPC_BackpackHolster;
+            }
+            if (parentContainerUid.find("RightForearm") != std::string::npos)
+            {
+                LOG_INFO("[Loadout] -> BPC_RightForearm_Slot");
+                return playerChar->BPC_RightForearm_Slot;
+            }
+            if (parentContainerUid.find("LeftForearm") != std::string::npos)
+            {
+                LOG_INFO("[Loadout] -> BPC_LeftForearm_Slot");
+                return playerChar->BPC_LeftForearm_Slot;
+            }
+
+            // Unknown player slot - return nullptr so caller places this in front of
+            // the player rather than silently putting it in the wrong slot
+            LOG_WARN("[Loadout] Unknown player slot, no match: " << parentContainerUid);
+            return nullptr;
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Loadout] Exception in GetPlayerBodySlotContainer: " << e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("[Loadout] Unknown exception in GetPlayerBodySlotContainer");
+        }
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------------------------
+    // SpawnAndAttachItem - kept as legacy shim, not used by new ApplyLoadout
+    // ---------------------------------------------------------------------------
+    SDK::AActor* LoadoutSubsystem::SpawnAndAttachItem(
+        SDK::UWorld* world,
+        SDK::URadiusContainerSubsystem* containerSubsystem,
+        const LoadoutItem& item,
+        SDK::UObject* parentContainer)
+    {
+        SDK::AActor* actor = SpawnItem(world, item);
+        if (actor && parentContainer)
+        {
+            // build transform from capture
+            SDK::FTransform relTransform = SDK::UKismetMathLibrary::MakeTransform(
+                SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
+                SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
+                SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
+            );
+            AttachToContainer(containerSubsystem, parentContainer, actor, item.itemTypeTag);
+            // apply relative transform after attachment
+            if (parentContainer && actor)
+            {
+                SDK::FHitResult hit{};
+                actor->K2_SetActorRelativeTransform(relTransform, false, &hit, true);
+                LOG_INFO("[Loadout] Applied relative transform on " << item.itemTypeTag);
+            }
+        }
+        return actor;
+    }
+
+    // ---------------------------------------------------------------------------
+    // ApplyLoadout  -  the main apply logic.
+    //
+    // Algorithm:
+    //   1. Load file, backup current gear, destroy current gear.
+    //   2. Collect all items from the loadout into a flat pending list.
+    //      Items whose itemTypeTag contains "Tablet" are skipped entirely.
+    //   3. Multi-pass topological spawn loop:
+    //      - Items with a "Player-" parent are spawned + attached to the
+    //        appropriate body slot immediately.
+    //      - Items with an item-slot parent wait until their parent's OLD uid
+    //        has been mapped to a NEW container id.  The new slot container id
+    //        is then constructed as  newParentContainerID + "-" + slotSuffix
+    //        and passed to GetContainerObject().
+    //   4. After every successful spawn the inventory is snapshotted before &
+    //      after to discover the new item's container ID, which is stored in
+    //      oldUidToNewUid for its children.
+    //   5. Items that still can't be placed after all passes are spawned in
+    //      front of the player as a last resort.
+    // ---------------------------------------------------------------------------
+    std::string LoadoutSubsystem::ApplyLoadout(SDK::UWorld* world, const std::string& loadoutName)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+        LOG_INFO("[Loadout] ========== APPLY LOADOUT START ==========");
+        LOG_INFO("[Loadout] Loadout name: " << loadoutName);
+
+        if (loadoutName.empty())  { return "Error: Loadout name cannot be empty"; }
+        if (!world)               { return "Error: World not ready"; }
+
+        // Load the file
+        LoadoutData loadout;
+        if (!LoadLoadoutFromFile(loadoutName, loadout))
+        {
+            return "Error: Failed to load loadout file '" + loadoutName + "'";
+        }
+        LOG_INFO("[Loadout] Loaded " << loadout.items.size() << " items from loadout file");
+
+        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+        if (!playerPawn) { return "Error: Player pawn not found"; }
+
+        SDK::URadiusContainerSubsystem* cs = GetContainerSubsystem(world);
+        if (!cs)         { return "Error: Container subsystem not found"; }
+
+        // --- Step 1: Backup current gear ---
+        LOG_INFO("[Loadout] Step 1: Backing up current gear...");
+        BackupCurrentLoadout(world);
+
+        // --- Step 2: Clear current gear ---
+        LOG_INFO("[Loadout] Step 2: Clearing current gear...");
+        int cleared = ClearPlayerLoadout(world);
+        LOG_INFO("[Loadout] Cleared " << cleared << " items");
+
+        // --- Step 3: Flatten item list (handle both flat and nested formats) ---
+        // The file format is flat, but the in-memory structure may have .attachments
+        // populated if the file had nested [ITEM] blocks. Flatten everything.
+        std::vector<LoadoutItem> pending;
+        {
+            std::function<void(const std::vector<LoadoutItem>&)> flattenInto =
+                [&](const std::vector<LoadoutItem>& src)
+            {
+                for (const auto& it : src)
+                {
+                    // Skip Tablet items entirely
+                    if (it.itemTypeTag.find("Tablet") != std::string::npos)
+                    {
+                        LOG_INFO("[Loadout] Skipping tablet item: " << it.itemTypeTag);
+                        continue;
+                    }
+                    pending.push_back(it);
+                    flattenInto(it.attachments);
+                }
+            };
+            flattenInto(loadout.items);
+        }
+
+        LOG_INFO("[Loadout] Pending items to spawn: " << (int)pending.size());
+
+        // oldUid -> new container ID (from inventory snapshot diff)
+        std::map<std::string, std::string> uidMap;
+
+        int spawnedCount = 0;
+        int failedCount  = 0;
+
+        // --- Step 4: Multi-pass topological spawn ---
+        // We allow enough passes for deeply nested hierarchies.
+        const int maxPasses = 15;
+
+        for (int pass = 0; pass < maxPasses && !pending.empty(); pass++)
+        {
+            std::vector<LoadoutItem> deferred;
+            bool anyProgressThisPass = false;
+
+            for (const auto& item : pending)
+            {
+                // Parse the parent UID
+                auto [baseUid, slotSuffix] = ParseParentUid(item.parentContainerUid);
+
+                SDK::UObject* parentContainer = nullptr;
+                bool parentResolved = false;
+
+                if (baseUid.empty())
+                {
+                    // ---- Player body slot ----
+                    parentContainer = GetPlayerBodySlotContainer(world, slotSuffix);
+                    // Even if nullptr (unknown slot), we still resolve on first pass
+                    // so the item spawns in front of the player rather than being
+                    // deferred forever.
+                    parentResolved = true;
+                }
+                else
+                {
+                    // ---- Item container slot ----
+                    auto it = uidMap.find(baseUid);
+                    if (it == uidMap.end())
+                    {
+                        // Parent not yet spawned; defer
+                        deferred.push_back(item);
+                        continue;
+                    }
+
+                    // Construct the new slot container ID:
+                    //   newParentContainerID + "-" + slotSuffix
+                    std::string newSlotContainerID = it->second + "-" + slotSuffix;
+                    LOG_INFO("[Loadout] Resolving slot: " << newSlotContainerID);
+
+                    std::wstring wSlot = ToWideString(newSlotContainerID);
+                    SDK::FString fSlot(wSlot.c_str());
+                    try
+                    {
+                        parentContainer = cs->GetContainerObject(fSlot);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        LOG_WARN("[Loadout] GetContainerObject threw: " << e.what());
+                    }
+                    catch (...)
+                    {
+                        LOG_WARN("[Loadout] GetContainerObject threw (unknown)");
+                    }
+
+                    if (!parentContainer)
+                    {
+                        // Slot container may not exist yet on first pass after attach;
+                        // defer one more time unless we're on the last pass.
+                        if (pass < maxPasses - 2)
+                        {
+                            LOG_INFO("[Loadout] Slot container not found yet, deferring: " << newSlotContainerID);
+                            deferred.push_back(item);
+                            continue;
+                        }
+                        LOG_WARN("[Loadout] Slot container still not found on pass " << pass
+                                 << ", will spawn in front of player: " << newSlotContainerID);
+                    }
+                    parentResolved = true;
+                }
+
+                if (!parentResolved)
+                {
+                    deferred.push_back(item);
+                    continue;
+                }
+
+                // --- Snapshot before spawn ---
+                std::set<std::string> snapBefore = SnapshotInventory(cs);
+
+                // --- Spawn the item ---
+                SDK::AActor* actor = SpawnItem(world, item);
+                if (!actor)
+                {
+                    LOG_ERROR("[Loadout] Spawn failed: " << item.itemTypeTag);
+                    failedCount++;
+                    // Don't re-queue; move on.
+                    continue;
+                }
+
+                // --- Attach to parent container ---
+                if (parentContainer)
+                {
+                    SDK::FTransform relTransform = SDK::UKismetMathLibrary::MakeTransform(
+                        SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
+                        SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
+                        SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
+                    );
+                    AttachToContainer(cs, parentContainer, actor, item.itemTypeTag);
+                    if (parentContainer && actor)
+                    {
+                        SDK::FHitResult hit{};
+                        actor->K2_SetActorRelativeTransform(relTransform, false, &hit, true);
+                        LOG_INFO("[Loadout] Applied relative transform on " << item.itemTypeTag);
+                    }
+                }
+                // (If parentContainer is nullptr, item sits in front of player - acceptable fallback)
+
+                // --- Snapshot after to discover new container ID ---
+                std::set<std::string> snapAfter = SnapshotInventory(cs);
+                std::string newContainerID;
+                for (const auto& uid : snapAfter)
+                {
+                    if (snapBefore.find(uid) == snapBefore.end())
+                    {
+                        newContainerID = uid;
+                        break;
+                    }
+                }
+
+                if (!newContainerID.empty())
+                {
+                    LOG_INFO("[Loadout] UID mapped: " << item.instanceUid
+                             << " -> " << newContainerID);
+                    uidMap[item.instanceUid] = newContainerID;
+                }
+                else
+                {
+                    // Inventory snapshot didn't change - item may not have been
+                    // registered (e.g. not properly attached).  Still log.
+                    LOG_WARN("[Loadout] Could not determine new container ID for: "
+                             << item.itemTypeTag << " (old uid=" << item.instanceUid << ")");
+                }
+
+                spawnedCount++;
+                anyProgressThisPass = true;
+            }
+
+            pending = deferred;
+            LOG_INFO("[Loadout] Pass " << pass << " done: spawned=" << spawnedCount
+                     << " deferred=" << (int)pending.size());
+
+            if (!anyProgressThisPass)
+            {
+                LOG_WARN("[Loadout] No progress this pass, breaking early");
+                break;
+            }
+        }
+
+        // --- Step 5: Last resort - spawn remaining items in front of player ---
+        for (const auto& item : pending)
+        {
+            LOG_WARN("[Loadout] Last-resort spawn in front of player: " << item.itemTypeTag
+                     << " (parent=" << item.parentContainerUid << ")");
+            SDK::AActor* actor = SpawnItem(world, item);
+            if (actor)
+            {
+                // apply captured world transform as a final adjustment
+                SDK::FTransform worldTransform = SDK::UKismetMathLibrary::MakeTransform(
+                    SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
+                    SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
+                    SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
+                );
+                try
+                {
+                    SDK::FHitResult hit{};
+                    actor->K2_SetActorTransform(worldTransform, false, &hit, true);
+                    LOG_INFO("[Loadout] Applied world transform on fallback item " << item.itemTypeTag);
+                }
+                catch (...)
+                {
+                    LOG_WARN("[Loadout] Failed to set world transform on fallback item");
+                }
+
+                spawnedCount++;
+            }
+            else
+            {
+                failedCount++;
+            }
+        }
+
+        std::ostringstream result;
+        result << "Applied loadout '" << loadoutName << "': "
+               << spawnedCount << " spawned";
+        if (failedCount > 0)
+        {
+            result << ", " << failedCount << " failed";
+        }
+
+        LOG_INFO("[Loadout] ========== APPLY LOADOUT END ==========");
+        LOG_INFO("[Loadout] " << result.str());
+
+        ModFeedback::ShowMessage(
+            (L"Loadout applied: " + std::wstring(loadoutName.begin(), loadoutName.end())).c_str(),
+            3.0f,
+            SDK::FLinearColor{0.5f, 1.0f, 0.0f, 1.0f});
+
+        return result.str();
     }
 }

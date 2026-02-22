@@ -117,6 +117,18 @@ namespace Mod::Loadout
          */
         bool LoadoutExists(const std::string& name) const;
         
+        /**
+         * Backup current player loadout to a temp file.
+         * @return true if backup succeeded
+         */
+        bool BackupCurrentLoadout(SDK::UWorld* world);
+        
+        /**
+         * Clear all items from player's equipment.
+         * @return Number of items dropped
+         */
+        int ClearPlayerLoadout(SDK::UWorld* world);
+        
     private:
         // Helper to recursively capture item data
         LoadoutItem CaptureItemData(SDK::URadiusItemDynamicData* itemData);
@@ -135,8 +147,15 @@ namespace Mod::Loadout
         bool DeserializeLoadout(const std::string& content, LoadoutData& outLoadout);
         std::string SerializeItem(const LoadoutItem& item, int depth) const;
         
-        // Apply helpers
-        bool SpawnItemFromLoadout(SDK::UWorld* world, const LoadoutItem& item, const std::string& parentContainer);
+        // Apply helpers (shim - real logic is in ApplyLoadout)
+        SDK::AActor* SpawnAndAttachItem(
+            SDK::UWorld* world,
+            SDK::URadiusContainerSubsystem* containerSubsystem,
+            const LoadoutItem& item,
+            SDK::UObject* parentContainer);
+        
+        // Get the player's body-slot container component for top-level items
+        SDK::UObject* GetPlayerBodySlotContainer(SDK::UWorld* world, const std::string& parentContainerUid);
         
         mutable std::recursive_mutex mutex_;
         std::string selectedLoadout_;

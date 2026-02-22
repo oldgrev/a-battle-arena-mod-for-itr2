@@ -10,6 +10,7 @@
 #include "AISubsystem.hpp"
 #include "ArenaSubsystem.hpp"
 #include "ItemSubsystem.hpp"
+#include "LoadoutSubsystem.hpp"
 #include "Cheats.hpp"
 
 namespace Mod
@@ -57,6 +58,12 @@ namespace Mod
         std::string HandleSpawnItemFull(SDK::UWorld *world, const std::vector<std::string> &args);
         std::string HandleClearItems(SDK::UWorld *world, const std::vector<std::string> &args);
         std::string HandleListItems(SDK::UWorld *world, const std::vector<std::string> &args);
+
+        // Loadout command implementations
+        std::string HandleCapture(SDK::UWorld *world, const std::vector<std::string> &args);
+        std::string HandleLoadouts(SDK::UWorld *world, const std::vector<std::string> &args);
+        std::string HandleLoadout(SDK::UWorld *world, const std::vector<std::string> &args);
+        std::string HandleApplyLoadout(SDK::UWorld *world, const std::vector<std::string> &args);
 
         // AI Subsystem instance
         AI::AISubsystem aiSubsystem_;

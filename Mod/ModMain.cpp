@@ -46,6 +46,7 @@
 #include "HookManager.hpp"
 #include "RuntimeState.hpp"
 #include "ArenaSubsystem.hpp"
+#include "LoadoutSubsystem.hpp"
 #include "GameContext.hpp"
 #include "ModFeedback.hpp"
 #include "ModTuning.hpp"
@@ -116,6 +117,9 @@ namespace Mod
         // Initialize hook manager
         HookManager::Get().Initialize();
         HookManager::Get().InstallProcessEventHook();
+
+        // Initialize loadout subsystem
+        Loadout::LoadoutSubsystem::Get()->Initialize();
 
         // Create command handler with all commands
         CommandHandlerRegistry commandHandler;

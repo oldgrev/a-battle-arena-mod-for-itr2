@@ -188,6 +188,7 @@
     <ClCompile Include="Mod\GameContext.cpp" />
     <ClCompile Include="Mod\HookManager.cpp" />
     <ClCompile Include="Mod\ItemSubsystem.cpp" />
+    <ClCompile Include="Mod\LoadoutSubsystem.cpp" />
     <ClCompile Include="Mod\ModFeedback.cpp" />
     <ClCompile Include="Mod\ModMain.cpp" />
     <ClCompile Include="Mod\RuntimeState.cpp" />

@@ -39,6 +39,7 @@ AILEARNINGS
 #include "HookManager.hpp"
 #include "GameContext.hpp"
 #include "ModTuning.hpp"
+#include "LoadoutSubsystem.hpp"
 
 #include <sstream>
 #include <random>
@@ -404,6 +405,19 @@ namespace Mod::Arena
 
         SDK::UWorld *world = SDK::UWorld::GetWorld();
         if (!world) return;
+
+        // Apply selected loadout if set
+        auto* loadoutSubsystem = Loadout::LoadoutSubsystem::Get();
+        if (loadoutSubsystem)
+        {
+            std::string selectedLoadout = loadoutSubsystem->GetSelectedLoadout();
+            if (!selectedLoadout.empty() && loadoutSubsystem->LoadoutExists(selectedLoadout))
+            {
+                LOG_INFO("[Arena] Applying loadout: " << selectedLoadout);
+                std::string result = loadoutSubsystem->ApplyLoadout(world, selectedLoadout);
+                LOG_INFO("[Arena] Loadout result: " << result);
+            }
+        }
 
         LOG_INFO("[Arena] Starting arena with " << enemiesPerWave_ << " enemies at " << distance_ << " units");
         StartWave(world);

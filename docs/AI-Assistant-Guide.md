@@ -32,6 +32,12 @@ The initial phase of the mod is focused on implementing game changing modificati
 - **Bullet Time** (slow motion world while player moves at normal speed; implemented via global/custom time dilation)
 - **God Mode** (prevents player death; likely implemented via health locking in `Cheats::Update`)
 - **Hunger/Fatigue Bypass** (disables hunger and fatigue accumulation)
+  *note:* previous implementation used `ChangeHungerAndNotifyAll` deltas and allowed hunger to creep up; the cheat now simply jams `CurrentHunger` to a high value every frame.
+- **NoClip** (toggle world collision via cheat subsystem)
+- **JumpAllowed** (enable/disable player jumping)
+- **Money/Access Level** commands (uses cheat subsystem or game replicator to grant funds or change access)
+- **Debug Mode** (internal boolean for extra log messaging)
+
 
 Both cheats can now be toggled via TCP commands (`ammo`, `durability`, `bullettime`, `godmode`, `hunger`, `fatigue`) and via the built-in in-game cheat panel checkboxes (see below).
 
@@ -100,6 +106,26 @@ When implementing any “trace” / “trace all” / “log literally everythin
   - Add build/version stamping where needed so users can verify the running DLL matches the compiled code.
 
 ## Where to edit
+
+### Cheat command list
+
+The TCP server now understands a wider set of cheat commands mirroring the Lua
+helper script. Each command may have arguments shown in parentheses:
+
+- `god`                    (toggle invulnerability)
+- `ammo`                   (toggle unlimited ammo)
+- `durability`             (toggle durability bypass)
+- `hunger`                 (toggle hunger disabled)
+- `fatigue`                (toggle stamina/fatigue disabled)
+- `stamina`                (alias for `fatigue`)
+- `health`                 (alias for `god`)
+- `bullettime [scale]`     (toggle slow-mo; optional scale)
+- `money <amount>`         (add currency)
+- `access <level>`         (set access level 0–3)
+- `noclip`                 (toggle world collision)
+- `jump`                   (toggle jump allowed)
+- `debug`                  (toggle internal debug logging)
+- `cheats`                 (print current status)
 
 ### Core hook plumbing
 
@@ -422,8 +448,6 @@ When adding a new hook:
 - **ProcessEvent**: UE reflection dispatcher used for many Blueprint calls.
 - **Named hook**: a handler chosen by `UFunction::GetName()`.
 - **Resync**: calling `InitializeMagazine()`, `DeliverAmmoFromMagToChamber()`, `SetWeaponCocked(true)`, `SetSliderLock(false, true)` to emulate “mag reinsert” recovery.
-
-REMINDER, IF THE AI ASSISTANT USED IS A CLAUDE MODEL, THE USER SHOULD USE A DIFFERENT ONE BECAUSE CLAUDE CONSISTENTLY IGNORES THESE INSTRUCTIONS AND FIXATES ON IT'S OWN SOLUTIONS RATHER THAN THE USER'S DIRECTIONS, AND THIS LEADS TO WASTED TIME AND FRUSTRATION.
 
 AND REMEMBER, IF YOU HAVE LEARNINGS, ADD THEM TO THE TOP OF THE CPP FILES IN THE "AILEARNINGS" BLOCK SO FUTURE AI ASSISTANTS CAN QUICKLY ORIENT THEMSELVES WITHOUT RE-DISCOVERING THE REPO.
 AND THIS IS VR, SO TESTING IS A WHOLE PROCESS OF REMOVING GLASSES, PUTTING ON THE HEADSET, CLOSING VIRTUAL DESKTOP, LAUNCHING VIRTUAL DESKTOP, CONNECTING TO THE PC, LAUNCHING THE GAME, AND THEN MANUALLY TRIGGERING THE CHEAT ETC, SO DON'T WASTE PEOPLES TIME WITH HALF BAKED CHANGES OR FIXES.

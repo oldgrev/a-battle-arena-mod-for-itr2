@@ -221,6 +221,61 @@ namespace Mod
             g_Cheats.ToggleBulletTime();
             return g_Cheats.GetStatus(); });
 
+        // new cheats matching the Lua helper functions
+        Register("money", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            int amount = 0;
+            if (!args.empty())
+            {
+                try { amount = std::stoi(args[0]); }
+                catch (...) { return "Invalid amount: " + args[0]; }
+            }
+            g_Cheats.AddMoney(amount);
+            return "Money command executed";
+        });
+
+        Register("access", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: access <level>";
+            int level = 0;
+            try { level = std::stoi(args[0]); } catch (...) { return "Invalid level: " + args[0]; }
+            g_Cheats.SetAccessLevel(level);
+            return "Access level set to " + std::to_string(level);
+        });
+
+        Register("noclip", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            (void)args;
+            g_Cheats.ToggleNoClip();
+            return g_Cheats.GetStatus();
+        });
+
+        Register("jump", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            (void)args;
+            g_Cheats.ToggleJumpAllowed();
+            return g_Cheats.GetStatus();
+        });
+
+        Register("debug", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            (void)args;
+            g_Cheats.ToggleDebugMode();
+            return g_Cheats.GetStatus();
+        });
+
+        // convenience aliases matching the Lua keybind names
+        Register("health", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { (void)world; (void)args; g_Cheats.ToggleGodMode(); return g_Cheats.GetStatus(); });
+        Register("stamina", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { (void)world; (void)args; g_Cheats.ToggleFatigueDisabled(); return g_Cheats.GetStatus(); });
+
         // Arena: simplified commands
         Register("arena_start", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
                  {
@@ -644,6 +699,25 @@ namespace Mod
                 Mod::HookManager::Trace_Flush();
                 return std::string("trace_dump_full: ") + Mod::HookManager::Trace_GetFilePath(); });
 
+        // -----------------------------------------------------------------
+        // Loadout commands
+        // -----------------------------------------------------------------
+        Register("capture", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { return HandleCapture(world, args); });
+
+        Register("loadouts", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { return HandleLoadouts(world, args); });
+
+        Register("loadout", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { return HandleLoadout(world, args); });
+
+        Register("apply", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { return HandleApplyLoadout(world, args); });
+
+        // Short alias for apply
+        Register("equip", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 { return HandleApplyLoadout(world, args); });
+
         LOG_INFO("[Command] Simplified Arena commands initialized");
     }
 
@@ -899,5 +973,111 @@ namespace Mod
             }
         }
         return itemSubsystem_.ListItems(world, maxLines);
+    }
+
+    // -----------------------------------------------------------------
+    // Loadout command handlers
+    // -----------------------------------------------------------------
+    
+    std::string CommandHandlerRegistry::HandleCapture(SDK::UWorld *world, const std::vector<std::string> &args)
+    {
+        std::string loadoutName = "default";
+        if (!args.empty())
+        {
+            loadoutName = args[0];
+        }
+        
+        auto* loadoutSubsystem = Loadout::LoadoutSubsystem::Get();
+        if (!loadoutSubsystem)
+        {
+            return "Error: LoadoutSubsystem not available";
+        }
+        
+        return loadoutSubsystem->CaptureLoadout(world, loadoutName);
+    }
+    
+    std::string CommandHandlerRegistry::HandleLoadouts(SDK::UWorld *world, const std::vector<std::string> &args)
+    {
+        (void)world;
+        (void)args;
+        
+        auto* loadoutSubsystem = Loadout::LoadoutSubsystem::Get();
+        if (!loadoutSubsystem)
+        {
+            return "Error: LoadoutSubsystem not available";
+        }
+        
+        return loadoutSubsystem->ListLoadouts();
+    }
+    
+    std::string CommandHandlerRegistry::HandleLoadout(SDK::UWorld *world, const std::vector<std::string> &args)
+    {
+        (void)world;
+        
+        auto* loadoutSubsystem = Loadout::LoadoutSubsystem::Get();
+        if (!loadoutSubsystem)
+        {
+            return "Error: LoadoutSubsystem not available";
+        }
+        
+        if (args.empty())
+        {
+            // Show current selection
+            std::string selected = loadoutSubsystem->GetSelectedLoadout();
+            if (selected.empty())
+            {
+                return "No loadout selected. Usage: loadout <name>";
+            }
+            return "Selected loadout: " + selected;
+        }
+        
+        std::string loadoutName = args[0];
+        
+        // Check if loadout exists
+        if (!loadoutSubsystem->LoadoutExists(loadoutName))
+        {
+            return "Error: Loadout '" + loadoutName + "' not found. Use 'loadouts' to list available.";
+        }
+        
+        loadoutSubsystem->SetSelectedLoadout(loadoutName);
+        
+        Mod::ModFeedback::ShowMessage(
+            (L"Loadout selected: " + std::wstring(loadoutName.begin(), loadoutName.end())).c_str(),
+            2.0f,
+            SDK::FLinearColor{0.5f, 0.8f, 1.0f, 1.0f});
+        
+        return "Selected loadout: " + loadoutName;
+    }
+    
+    std::string CommandHandlerRegistry::HandleApplyLoadout(SDK::UWorld *world, const std::vector<std::string> &args)
+    {
+        auto* loadoutSubsystem = Loadout::LoadoutSubsystem::Get();
+        if (!loadoutSubsystem)
+        {
+            return "Error: LoadoutSubsystem not available";
+        }
+        
+        std::string loadoutName;
+        if (!args.empty())
+        {
+            loadoutName = args[0];
+        }
+        else
+        {
+            // Use selected loadout
+            loadoutName = loadoutSubsystem->GetSelectedLoadout();
+            if (loadoutName.empty())
+            {
+                return "Error: No loadout specified and none selected. Usage: apply <loadout_name>";
+            }
+        }
+        
+        // Check if loadout exists
+        if (!loadoutSubsystem->LoadoutExists(loadoutName))
+        {
+            return "Error: Loadout '" + loadoutName + "' not found. Use 'loadouts' to list available.";
+        }
+        
+        return loadoutSubsystem->ApplyLoadout(world, loadoutName);
     }
 }

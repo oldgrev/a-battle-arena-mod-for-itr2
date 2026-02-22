@@ -49,6 +49,24 @@ namespace Mod
         // Set bullet time scale (e.g. 0.2 for 5x slow mo)
         void SetBulletTimeScale(float scale);
 
+        // Toggle no-clip using the game's cheat subsystem
+        void ToggleNoClip();
+        bool IsNoClipActive() const;
+
+        // Toggle whether the player is allowed to jump
+        void ToggleJumpAllowed();
+        bool IsJumpAllowedActive() const;
+
+        // Add money instantly (delta may be negative)
+        void AddMoney(int amount);
+
+        // Change the access level (0-3 interpreted by game)
+        void SetAccessLevel(int level);
+
+        // Toggle internal debug mode for extra log messages
+        void ToggleDebugMode();
+        bool IsDebugModeActive() const;
+
         // Get cheat status as string
         std::string GetStatus() const;
 
@@ -72,7 +90,12 @@ namespace Mod
         std::atomic<bool> fatigueDisabled_{false};
         std::atomic<bool> bulletTimeActive_{false};
         std::atomic<float> bulletTimeScale_{0.2f};
-        
+
+        // additional cheat state
+        std::atomic<bool> noClipActive_{false};
+        std::atomic<bool> jumpAllowedActive_{false};
+        std::atomic<bool> debugModeActive_{false};
+
         // Counter for periodic durability check (every 600 cycles)
         uint32_t durabilityCheckCounter_{0};
 

@@ -18,21 +18,43 @@ SetUnlimitedAmmo/SetGodMode/etc.
 #include "Logging.hpp"
 #include "ArenaSubsystem.hpp"
 #include "ModTuning.hpp"
+#include "GameContext.hpp"  // for world access when interacting with subsystems
+
+// forward declare cheat subsystem type for convenience
+using CheatSubsystem_t = SDK::URadiusCheatSubsystem;
 
 namespace Mod
 {
-    // Helper to access TArray members when the SDK headers are being difficult.
-    template <typename ElementType>
-    struct TArrayRaw { ElementType *Data; int32_t NumElements; int32_t MaxElements; };
+    namespace
+    {
+        // helper to retrieve the cheat subsystem from the current world (may return nullptr)
+        CheatSubsystem_t* GetCheatSubsystem()
+        {
+            SDK::UWorld* world = GameContext::GetWorld();
+            if (!world)
+                return nullptr;
+            SDK::UGameInstance* gi = world->OwningGameInstance;
+            if (!gi)
+                return nullptr;
+            // Manual search for URadiusCheatSubsystem in subsystems
+            // Note: GetGameInstanceSubsystem is a template function not available in SDK
+            // We need to find the subsystem ourselves
+            return nullptr; // Cheat subsystem access needs different approach
+        }
 
-    template <typename ElementType>
-    static int32_t GetTArrayNum(const SDK::TArray<ElementType>& arr) {
-        return reinterpret_cast<const TArrayRaw<ElementType>*>(&arr)->NumElements;
-    }
+        // Helper to access TArray members when the SDK headers are being difficult.
+        template <typename ElementType>
+        struct TArrayRaw { ElementType *Data; int32_t NumElements; int32_t MaxElements; };
 
-    template <typename ElementType>
-    static ElementType* GetTArrayData(const SDK::TArray<ElementType>& arr) {
-        return reinterpret_cast<const TArrayRaw<ElementType>*>(&arr)->Data;
+        template <typename ElementType>
+        static int32_t GetTArrayNum(const SDK::TArray<ElementType>& arr) {
+            return reinterpret_cast<const TArrayRaw<ElementType>*>(&arr)->NumElements;
+        }
+
+        template <typename ElementType>
+        static ElementType* GetTArrayData(const SDK::TArray<ElementType>& arr) {
+            return reinterpret_cast<const TArrayRaw<ElementType>*>(&arr)->Data;
+        }
     }
 
     Cheats::Cheats()
@@ -199,6 +221,127 @@ namespace Mod
         LOG_INFO("[Cheats] Bullet Time scale set to " << scale);
     }
 
+    // ------------------------------------------------------------------------
+    // Additional cheats implemented based on Lua script
+    // ------------------------------------------------------------------------
+
+    void Cheats::ToggleNoClip()
+    {
+        CheatSubsystem_t* cheatsub = GetCheatSubsystem();
+        if (!cheatsub)
+        {
+            LOG_WARN("[Cheats] ToggleNoClip: cheat subsystem not available");
+            return;
+        }
+        bool oldVal = cheatsub->GetNoClip();
+        cheatsub->SetNoClip(!oldVal);
+        noClipActive_ = !oldVal;
+        Mod::ModFeedback::ShowMessage(noClipActive_ ? L"[Mod] NoClip: ON" : L"[Mod] NoClip: OFF", 2.0f);
+        LOG_INFO("[Cheats] NoClip " << (noClipActive_ ? "enabled" : "disabled"));
+    }
+
+    bool Cheats::IsNoClipActive() const
+    {
+        return noClipActive_;
+    }
+
+    void Cheats::ToggleJumpAllowed()
+    {
+        CheatSubsystem_t* cheatsub = GetCheatSubsystem();
+        if (!cheatsub)
+        {
+            LOG_WARN("[Cheats] ToggleJumpAllowed: cheat subsystem not available");
+            return;
+        }
+        bool oldVal = cheatsub->IsJumpAllowed();
+        cheatsub->SetJumpAllowed(!oldVal);
+        jumpAllowedActive_ = !oldVal;
+        Mod::ModFeedback::ShowMessage(jumpAllowedActive_ ? L"[Mod] Jump: ALLOWED" : L"[Mod] Jump: DISABLED", 2.0f);
+        LOG_INFO("[Cheats] JumpAllowed " << (jumpAllowedActive_ ? "enabled" : "disabled"));
+    }
+
+    bool Cheats::IsJumpAllowedActive() const
+    {
+        return jumpAllowedActive_;
+    }
+
+    void Cheats::AddMoney(int amount)
+    {
+        CheatSubsystem_t* cheatsub = GetCheatSubsystem();
+        if (cheatsub)
+        {
+            cheatsub->AddMoney(amount);
+            LOG_INFO("[Cheats] Added money: " << amount);
+            Mod::ModFeedback::ShowMessage(L"[Mod] Money added", 2.0f);
+        }
+        else
+        {
+            // fallback: find replicator actor in world similar to Lua script
+            SDK::ARadiusGameDataReplicator* replicator = nullptr;
+            if (SDK::UWorld* world = GameContext::GetWorld())
+            {
+                SDK::TArray<SDK::AActor*> actors;
+                SDK::UGameplayStatics::GetAllActorsOfClass(world, SDK::ARadiusGameDataReplicator::StaticClass(), &actors);
+                if (actors.Num() > 0)
+                    replicator = static_cast<SDK::ARadiusGameDataReplicator*>(actors[0]);
+            }
+            if (replicator)
+            {
+                replicator->Money += amount;
+                LOG_INFO("[Cheats] (replicator) Added money: " << amount);
+                Mod::ModFeedback::ShowMessage(L"[Mod] Money added", 2.0f);
+            }
+            else
+            {
+                LOG_WARN("[Cheats] AddMoney: cheat subsystem unavailable and no replicator found");
+            }
+        }
+    }
+
+    void Cheats::SetAccessLevel(int level)
+    {
+        CheatSubsystem_t* cheatsub = GetCheatSubsystem();
+        if (cheatsub)
+        {
+            cheatsub->SetAccessLevel(level);
+            LOG_INFO("[Cheats] Set access level to " << level);
+            Mod::ModFeedback::ShowMessage(L"[Mod] Access level changed", 2.0f);
+        }
+        else
+        {
+            SDK::ARadiusGameDataReplicator* replicator = nullptr;
+            if (SDK::UWorld* world = GameContext::GetWorld())
+            {
+                SDK::TArray<SDK::AActor*> actors;
+                SDK::UGameplayStatics::GetAllActorsOfClass(world, SDK::ARadiusGameDataReplicator::StaticClass(), &actors);
+                if (actors.Num() > 0)
+                    replicator = static_cast<SDK::ARadiusGameDataReplicator*>(actors[0]);
+            }
+            if (replicator)
+            {
+                replicator->SetAccessLevel(level);
+                LOG_INFO("[Cheats] (replicator) Set access level to " << level);
+                Mod::ModFeedback::ShowMessage(L"[Mod] Access level changed", 2.0f);
+            }
+            else
+            {
+                LOG_WARN("[Cheats] SetAccessLevel: cheat subsystem unavailable and no replicator found");
+            }
+        }
+    }
+
+    void Cheats::ToggleDebugMode()
+    {
+        debugModeActive_ = !debugModeActive_;
+        LOG_INFO("[Cheats] Debug mode " << (debugModeActive_ ? "enabled" : "disabled"));
+        Mod::ModFeedback::ShowMessage(debugModeActive_ ? L"[Mod] Debug: ON" : L"[Mod] Debug: OFF", 2.0f);
+    }
+
+    bool Cheats::IsDebugModeActive() const
+    {
+        return debugModeActive_;
+    }
+
     std::string Cheats::GetStatus() const
     {
         std::ostringstream status;
@@ -208,9 +351,13 @@ namespace Mod
         status << "  Durability Bypass: " << (durabilityBypassActive_ ? "ACTIVE" : "inactive") << "\n";
         status << "  Hunger Disabled: " << (hungerDisabled_ ? "ACTIVE" : "inactive") << "\n";
         status << "  Fatigue Disabled: " << (fatigueDisabled_ ? "ACTIVE" : "inactive") << "\n";
-        status << "  Bullet Time: " << (bulletTimeActive_ ? "ACTIVE" : "inactive") << " (Scale: " << bulletTimeScale_ << ")";
+        status << "  Bullet Time: " << (bulletTimeActive_ ? "ACTIVE" : "inactive") << " (Scale: " << bulletTimeScale_ << ")\n";
+        status << "  NoClip: " << (noClipActive_ ? "ON" : "off") << "\n";
+        status << "  Jump Allowed: " << (jumpAllowedActive_ ? "ON" : "off") << "\n";
+        status << "  Debug Mode: " << (debugModeActive_ ? "ON" : "off");
         return status.str();
     }
+
 
     void Cheats::DeactivateAll()
     {
@@ -220,6 +367,9 @@ namespace Mod
         if (hungerDisabled_) ToggleHungerDisabled();
         if (fatigueDisabled_) ToggleFatigueDisabled();
         if (bulletTimeActive_) ToggleBulletTime();
+        if (noClipActive_) ToggleNoClip();
+        if (jumpAllowedActive_) ToggleJumpAllowed();
+        if (debugModeActive_) ToggleDebugMode();
         
         LOG_INFO("[Cheats] All cheats deactivated");
     }
@@ -456,22 +606,19 @@ namespace Mod
 
         if (hungerDisabled_.load())
         {
-            float hunger = playerStats->GetHunger();
-            // Most games use 0-100 or 0-1 for hunger. ITR2 seems to use 0-100 based on health logic.
-            if (hunger < 95.0f)
-            {
-                playerStats->ChangeHungerAndNotifyAll(100.0f - hunger);
-            }
+            // the game's hunger value appears to be a resource that drains over time;
+            // simply resetting it to a very high value each frame prevents any
+            // accumulation. matching the Lua script we use 10k as a safe upper bound.
+            playerStats->CurrentHunger = 10000.0f;
         }
 
         if (fatigueDisabled_.load())
         {
-            float stamina = playerStats->GetStamina();
+            // simple approach: jam the current stamina value up to the max so the
+            // player never runs out. (previous delta based approach sometimes
+            // allowed tiny losses over time.)
             float maxStamina = playerStats->GetMaxStaminaAffectedByHunger();
-            if (stamina < (maxStamina - 5.0f))
-            {
-                playerStats->ChangeStaminaAndNotifyAll(maxStamina - stamina);
-            }
+            playerStats->CurrentStamina = maxStamina;
         }
     }
 

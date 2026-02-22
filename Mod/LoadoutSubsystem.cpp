@@ -1248,20 +1248,11 @@ namespace Mod::Loadout
         SDK::AActor* actor = SpawnItem(world, item);
         if (actor && parentContainer)
         {
-            // build transform from capture
-            SDK::FTransform relTransform = SDK::UKismetMathLibrary::MakeTransform(
-                SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
-                SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
-                SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
-            );
+            // NOTE: Do NOT apply saved transform as a relative transform.
+            // The saved posX/Y/Z values come from DynamicTransform.DynamicLocation which is
+            // a world-space position. Applying it as K2_SetActorRelativeTransform would
+            // displace the item by thousands of units. The container handles placement.
             AttachToContainer(containerSubsystem, parentContainer, actor, item.itemTypeTag);
-            // apply relative transform after attachment
-            if (parentContainer && actor)
-            {
-                SDK::FHitResult hit{};
-                actor->K2_SetActorRelativeTransform(relTransform, false, &hit, true);
-                LOG_INFO("[Loadout] Applied relative transform on " << item.itemTypeTag);
-            }
         }
         return actor;
     }
@@ -1302,10 +1293,19 @@ namespace Mod::Loadout
         {
             return "Error: Failed to load loadout file '" + loadoutName + "'";
         }
-        LOG_INFO("[Loadout] Loaded " << loadout.items.size() << " items from loadout file");
+        LOG_INFO("[Loadout] Loaded " << loadout.items.size() << " top-level items from loadout file");
 
         SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
         if (!playerPawn) { return "Error: Player pawn not found"; }
+
+        // Log current player location for reference
+        try
+        {
+            SDK::FVector pLoc = playerPawn->K2_GetActorLocation();
+            LOG_INFO("[Loadout] Player world location: ("
+                     << pLoc.X << ", " << pLoc.Y << ", " << pLoc.Z << ")");
+        }
+        catch (...) { LOG_WARN("[Loadout] Could not read player location"); }
 
         SDK::URadiusContainerSubsystem* cs = GetContainerSubsystem(world);
         if (!cs)         { return "Error: Container subsystem not found"; }
@@ -1342,7 +1342,19 @@ namespace Mod::Loadout
             flattenInto(loadout.items);
         }
 
-        LOG_INFO("[Loadout] Pending items to spawn: " << (int)pending.size());
+        LOG_INFO("[Loadout] Step 3 complete: " << (int)pending.size() << " items pending spawn");
+        LOG_INFO("[Loadout] NOTE: saved transform values are world-space positions captured at "
+                 "capture time (DynamicTransform.DynamicLocation). They are NOT applied as "
+                 "relative transforms; the container system handles item placement.");
+        for (int i = 0; i < (int)pending.size(); i++)
+        {
+            const auto& it = pending[i];
+            LOG_INFO("[Loadout]   pending[" << i << "] type=" << it.itemTypeTag
+                     << " parent=" << it.parentContainerUid
+                     << " capturedPos=(" << it.transform.posX
+                     << "," << it.transform.posY
+                     << "," << it.transform.posZ << ")");
+        }
 
         // oldUid -> new container ID (from inventory snapshot diff)
         std::map<std::string, std::string> uidMap;
@@ -1429,6 +1441,19 @@ namespace Mod::Loadout
                     continue;
                 }
 
+                LOG_INFO("[Loadout] [Pass " << pass << "] --- Item: " << item.itemTypeTag);
+                LOG_INFO("[Loadout]   uid=" << item.instanceUid
+                         << " parent=" << item.parentContainerUid);
+                LOG_INFO("[Loadout]   capturedWorldPos=("
+                         << item.transform.posX << ","
+                         << item.transform.posY << ","
+                         << item.transform.posZ << ")"
+                         << " capturedRot=("
+                         << item.transform.rotPitch << ","
+                         << item.transform.rotYaw << ","
+                         << item.transform.rotRoll << ")");
+                LOG_INFO("[Loadout]   parentContainer=" << (void*)parentContainer);
+
                 // --- Snapshot before spawn ---
                 std::set<std::string> snapBefore = SnapshotInventory(cs);
 
@@ -1436,29 +1461,56 @@ namespace Mod::Loadout
                 SDK::AActor* actor = SpawnItem(world, item);
                 if (!actor)
                 {
-                    LOG_ERROR("[Loadout] Spawn failed: " << item.itemTypeTag);
+                    LOG_ERROR("[Loadout]   SPAWN FAILED: " << item.itemTypeTag);
                     failedCount++;
                     // Don't re-queue; move on.
                     continue;
                 }
 
+                // Log world position immediately after spawn (should be ~100cm in front of player)
+                try
+                {
+                    SDK::FVector spawnPos = actor->K2_GetActorLocation();
+                    LOG_INFO("[Loadout]   post-spawn worldPos=("
+                             << spawnPos.X << "," << spawnPos.Y << "," << spawnPos.Z << ")");
+                }
+                catch (...) { LOG_WARN("[Loadout]   Could not read post-spawn worldPos"); }
+
                 // --- Attach to parent container ---
+                // NOTE: The saved posX/Y/Z come from DynamicTransform.DynamicLocation which is
+                // a world-space position, NOT a container-relative offset. Applying it as
+                // K2_SetActorRelativeTransform would displace items by thousands of units.
+                // The container system (InstantHolsterActor / PutItemToContainer) handles
+                // slot placement; we log positions before and after so the effect is visible.
                 if (parentContainer)
                 {
-                    SDK::FTransform relTransform = SDK::UKismetMathLibrary::MakeTransform(
-                        SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
-                        SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
-                        SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
-                    );
-                    AttachToContainer(cs, parentContainer, actor, item.itemTypeTag);
-                    if (parentContainer && actor)
+                    bool attached = AttachToContainer(cs, parentContainer, actor, item.itemTypeTag);
+                    LOG_INFO("[Loadout]   attach result=" << (attached ? "true" : "false"));
+
+                    // Log world position after attachment to show what the container did
+                    try
                     {
-                        SDK::FHitResult hit{};
-                        actor->K2_SetActorRelativeTransform(relTransform, false, &hit, true);
-                        LOG_INFO("[Loadout] Applied relative transform on " << item.itemTypeTag);
+                        SDK::FVector postAttachPos = actor->K2_GetActorLocation();
+                        LOG_INFO("[Loadout]   post-attach worldPos=("
+                                 << postAttachPos.X << ","
+                                 << postAttachPos.Y << ","
+                                 << postAttachPos.Z << ")");
+
+                        // Show delta vs captured position so we can see the discrepancy directly
+                        float dx = postAttachPos.X - item.transform.posX;
+                        float dy = postAttachPos.Y - item.transform.posY;
+                        float dz = postAttachPos.Z - item.transform.posZ;
+                        LOG_INFO("[Loadout]   delta vs capturedWorldPos=("
+                                 << dx << "," << dy << "," << dz << ")"
+                                 << " [ideally near zero if player hasn't moved]");
                     }
+                    catch (...) { LOG_WARN("[Loadout]   Could not read post-attach worldPos"); }
                 }
-                // (If parentContainer is nullptr, item sits in front of player - acceptable fallback)
+                else
+                {
+                    // No container - item stays in front of player from SpawnItem
+                    LOG_WARN("[Loadout]   No parent container resolved; item left in front of player");
+                }
 
                 // --- Snapshot after to discover new container ID ---
                 std::set<std::string> snapAfter = SnapshotInventory(cs);
@@ -1474,16 +1526,16 @@ namespace Mod::Loadout
 
                 if (!newContainerID.empty())
                 {
-                    LOG_INFO("[Loadout] UID mapped: " << item.instanceUid
-                             << " -> " << newContainerID);
+                    LOG_INFO("[Loadout]   inventory snapshot: " << item.instanceUid
+                             << " -> new containerID=" << newContainerID);
                     uidMap[item.instanceUid] = newContainerID;
                 }
                 else
                 {
-                    // Inventory snapshot didn't change - item may not have been
-                    // registered (e.g. not properly attached).  Still log.
-                    LOG_WARN("[Loadout] Could not determine new container ID for: "
-                             << item.itemTypeTag << " (old uid=" << item.instanceUid << ")");
+                    LOG_WARN("[Loadout]   inventory snapshot: no new entry found for "
+                             << item.itemTypeTag
+                             << " (uid=" << item.instanceUid << ")"
+                             << " - item may not have registered in container");
                 }
 
                 spawnedCount++;
@@ -1502,34 +1554,44 @@ namespace Mod::Loadout
         }
 
         // --- Step 5: Last resort - spawn remaining items in front of player ---
+        // SpawnItem already places items 100 cm in front of the player.
+        // Do NOT apply the saved world-space transform here: the saved position is
+        // from capture time and would teleport the item to a completely different
+        // location in the world, potentially thousands of units away.
+        if (!pending.empty())
+        {
+            LOG_WARN("[Loadout] Step 5: " << (int)pending.size()
+                     << " items could not be placed in containers, spawning in front of player");
+        }
         for (const auto& item : pending)
         {
-            LOG_WARN("[Loadout] Last-resort spawn in front of player: " << item.itemTypeTag
-                     << " (parent=" << item.parentContainerUid << ")");
+            LOG_WARN("[Loadout] [Fallback] Item: " << item.itemTypeTag
+                     << " uid=" << item.instanceUid
+                     << " parent=" << item.parentContainerUid);
+            LOG_WARN("[Loadout] [Fallback]   capturedWorldPos=("
+                     << item.transform.posX << ","
+                     << item.transform.posY << ","
+                     << item.transform.posZ << ")");
             SDK::AActor* actor = SpawnItem(world, item);
             if (actor)
             {
-                // apply captured world transform as a final adjustment
-                SDK::FTransform worldTransform = SDK::UKismetMathLibrary::MakeTransform(
-                    SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
-                    SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
-                    SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
-                );
+                // Item is already near the player from SpawnItem; no transform override.
                 try
                 {
-                    SDK::FHitResult hit{};
-                    actor->K2_SetActorTransform(worldTransform, false, &hit, true);
-                    LOG_INFO("[Loadout] Applied world transform on fallback item " << item.itemTypeTag);
+                    SDK::FVector pos = actor->K2_GetActorLocation();
+                    LOG_WARN("[Loadout] [Fallback]   spawned at worldPos=("
+                             << pos.X << "," << pos.Y << "," << pos.Z << ")"
+                             << " (capturedWorldPos was ("
+                             << item.transform.posX << ","
+                             << item.transform.posY << ","
+                             << item.transform.posZ << "))");
                 }
-                catch (...)
-                {
-                    LOG_WARN("[Loadout] Failed to set world transform on fallback item");
-                }
-
+                catch (...) { LOG_WARN("[Loadout] [Fallback]   could not read spawn worldPos"); }
                 spawnedCount++;
             }
             else
             {
+                LOG_ERROR("[Loadout] [Fallback]   SPAWN FAILED: " << item.itemTypeTag);
                 failedCount++;
             }
         }

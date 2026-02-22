@@ -609,7 +609,7 @@ namespace Mod
             // the game's hunger value appears to be a resource that drains over time;
             // simply resetting it to a very high value each frame prevents any
             // accumulation. matching the Lua script we use 10k as a safe upper bound.
-            playerStats->CurrentHunger = 10000.0f;
+            playerStats->CurrentHunger = 65535.0f;
         }
 
         if (fatigueDisabled_.load())

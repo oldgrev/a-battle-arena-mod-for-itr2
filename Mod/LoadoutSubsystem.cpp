@@ -3,8 +3,16 @@ AILEARNINGS
 - GetPlayersInventory returns player items as TArray<URadiusItemDynamicData*>
 - ItemType.TagName gives the FGameplayTag's FName which can be converted to string
 - Attachments are stored directly in URadiusItemDynamicData::Attachments array
-- Transform data is in DynamicTransform.LocalTransform (FTransform)
+- Transform data is in DynamicTransform.DynamicLocation/DynamicRotation (not LocalTransform)
 - Use UFLSpawn::SpawnItemByTypeTag with FItemConfiguration to spawn items
+- FName cannot be constructed from const char* - must use SDK::BasicFilesImpleUtils::StringToName(wchar_t*)
+- URadiusContainerSubsystem is a WORLD subsystem - use USubsystemBlueprintLibrary::GetWorldSubsystem()
+- GetPlayersInventory() returns FLAT list of ALL player items, not hierarchical
+- Parent-child relationships are tracked via ParentContainerUid field
+- IsPlayerContainerID() checks if a container UID belongs to the player
+- GetTopParentContainerID() finds the root container for any item
+- GetAllPlayerItems() takes AActor* Player and fills TArray<ARadiusItemBase*>
+- Container hierarchy: Player -> ChestRig/Backpack -> Pouches -> Magazines/Boxes -> Ammo
 */
 
 #include "LoadoutSubsystem.hpp"
@@ -17,6 +25,7 @@ AILEARNINGS
 #include <filesystem>
 #include <chrono>
 #include <iomanip>
+#include <set>
 
 namespace fs = std::filesystem;
 
@@ -79,40 +88,107 @@ namespace Mod::Loadout
     
     SDK::URadiusContainerSubsystem* LoadoutSubsystem::GetContainerSubsystem(SDK::UWorld* world) const
     {
+        LOG_INFO("[Loadout] GetContainerSubsystem called, world=" << (void*)world);
+        
         if (!world)
         {
-            LOG_ERROR("[Loadout] World is null");
+            LOG_ERROR("[Loadout] GetContainerSubsystem: World is null");
             return nullptr;
         }
         
-        // Get the RadiusContainerSubsystem from the world
+        // Log world info
+        try
+        {
+            LOG_INFO("[Loadout] World class: " << world->Class->GetName());
+        }
+        catch (...)
+        {
+            LOG_WARN("[Loadout] Failed to get world class name");
+        }
+        
+        // Use the proper subsystem retrieval method (same pattern as ArenaSubsystem, AISubsystem)
         SDK::URadiusContainerSubsystem* subsystem = nullptr;
         
-        // Try to find it via UWorld subsystems
-        // The subsystem should be accessible via world->GetSubsystem<URadiusContainerSubsystem>()
-        // But since that's a template, we need to use FindObject or similar
-        
-        // Search for the subsystem in GObjects
-        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++)
+        try
         {
-            SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(i);
-            if (!obj) continue;
+            subsystem = static_cast<SDK::URadiusContainerSubsystem*>(
+                SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(
+                    world, 
+                    SDK::URadiusContainerSubsystem::StaticClass()
+                )
+            );
             
-            // Check class name
-            SDK::UClass* cls = obj->Class;
-            if (!cls) continue;
+            LOG_INFO("[Loadout] GetWorldSubsystem returned: " << (void*)subsystem);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Loadout] Exception in GetWorldSubsystem: " << e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("[Loadout] Unknown exception in GetWorldSubsystem");
+        }
+        
+        // Fallback: scan GObjects if GetWorldSubsystem fails
+        if (!subsystem)
+        {
+            LOG_WARN("[Loadout] GetWorldSubsystem failed, falling back to GObjects scan");
             
-            std::string className = cls->GetName();
-            if (className == "RadiusContainerSubsystem")
+            int scannedCount = 0;
+            int containerSubsystemCount = 0;
+            
+            for (int i = 0; i < SDK::UObject::GObjects->Num(); i++)
             {
-                subsystem = static_cast<SDK::URadiusContainerSubsystem*>(obj);
-                break;
+                SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(i);
+                if (!obj) continue;
+                scannedCount++;
+                
+                SDK::UClass* cls = obj->Class;
+                if (!cls) continue;
+                
+                std::string className = cls->GetName();
+                if (className == "RadiusContainerSubsystem")
+                {
+                    containerSubsystemCount++;
+                    
+                    // Try to validate this is the right one for our world
+                    auto* candidate = static_cast<SDK::URadiusContainerSubsystem*>(obj);
+                    
+                    // Log the candidate
+                    LOG_INFO("[Loadout] Found RadiusContainerSubsystem candidate #" << containerSubsystemCount 
+                             << " at " << (void*)candidate);
+                    
+                    // Check if it's valid and has containers
+                    try
+                    {
+                        auto containers = candidate->GetContainers();
+                        LOG_INFO("[Loadout] Candidate has " << containers.Num() << " containers");
+                        
+                        // Accept first one with containers, or just first one
+                        if (!subsystem || containers.Num() > 0)
+                        {
+                            subsystem = candidate;
+                            if (containers.Num() > 0)
+                            {
+                                LOG_INFO("[Loadout] Selected this candidate (has containers)");
+                                break;
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        LOG_WARN("[Loadout] Exception checking candidate, skipping");
+                    }
+                }
             }
+            
+            LOG_INFO("[Loadout] GObjects scan: scanned " << scannedCount 
+                     << " objects, found " << containerSubsystemCount << " container subsystems");
         }
         
         if (!subsystem)
         {
-            LOG_ERROR("[Loadout] Could not find RadiusContainerSubsystem");
+            LOG_ERROR("[Loadout] Could not find RadiusContainerSubsystem by any method");
         }
         
         return subsystem;
@@ -122,38 +198,165 @@ namespace Mod::Loadout
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         
+        LOG_INFO("[Loadout] ========== CAPTURE LOADOUT START ==========");
+        LOG_INFO("[Loadout] Loadout name: " << loadoutName);
+        LOG_INFO("[Loadout] World: " << (void*)world);
+        
         if (loadoutName.empty())
         {
+            LOG_ERROR("[Loadout] Empty loadout name");
             return "Error: Loadout name cannot be empty";
         }
         
         if (!world)
         {
+            LOG_ERROR("[Loadout] World is null");
             return "Error: World not ready";
         }
         
-        LOG_INFO("[Loadout] Capturing loadout: " << loadoutName);
+        // Get the player character for reference
+        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+        LOG_INFO("[Loadout] Player pawn: " << (void*)playerPawn);
+        
+        if (playerPawn)
+        {
+            try
+            {
+                LOG_INFO("[Loadout] Player class: " << playerPawn->Class->GetName());
+                SDK::FVector loc = playerPawn->K2_GetActorLocation();
+                LOG_INFO("[Loadout] Player location: (" << loc.X << ", " << loc.Y << ", " << loc.Z << ")");
+            }
+            catch (...) { LOG_WARN("[Loadout] Failed to log player details"); }
+        }
         
         // Get the container subsystem
         SDK::URadiusContainerSubsystem* containerSubsystem = GetContainerSubsystem(world);
         if (!containerSubsystem)
         {
+            LOG_ERROR("[Loadout] Container subsystem is null after GetContainerSubsystem");
             return "Error: Could not find container subsystem";
         }
         
-        // Get player's inventory items
+        LOG_INFO("[Loadout] Container subsystem: " << (void*)containerSubsystem);
+        
+        // === METHOD 1: GetPlayersInventory() ===
+        LOG_INFO("[Loadout] === METHOD 1: Trying GetPlayersInventory() ===");
         SDK::TArray<SDK::URadiusItemDynamicData*> playerItems;
+        int method1Count = 0;
+        
         try
         {
             playerItems = containerSubsystem->GetPlayersInventory();
+            method1Count = playerItems.Num();
+            LOG_INFO("[Loadout] GetPlayersInventory returned " << method1Count << " items");
+            
+            // Log first few items for debugging
+            for (int i = 0; i < playerItems.Num() && i < 10; i++)
+            {
+                SDK::URadiusItemDynamicData* item = playerItems[i];
+                if (item)
+                {
+                    try
+                    {
+                        std::string typeTag = item->ItemType.TagName.ToString();
+                        std::string uid = item->InstanceUid.ToString();
+                        std::string parentUid = item->ParentContainerUid.ToString();
+                        LOG_INFO("[Loadout]   Item[" << i << "]: type=" << typeTag 
+                                 << " uid=" << uid 
+                                 << " parent=" << parentUid);
+                    }
+                    catch (...) { LOG_WARN("[Loadout]   Item[" << i << "]: failed to read"); }
+                }
+                else
+                {
+                    LOG_WARN("[Loadout]   Item[" << i << "]: null");
+                }
+            }
+            if (method1Count > 10)
+            {
+                LOG_INFO("[Loadout]   ... and " << (method1Count - 10) << " more items");
+            }
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Loadout] GetPlayersInventory exception: " << e.what());
         }
         catch (...)
         {
-            LOG_ERROR("[Loadout] Exception calling GetPlayersInventory");
-            return "Error: Failed to get player inventory";
+            LOG_ERROR("[Loadout] GetPlayersInventory unknown exception");
         }
         
-        LOG_INFO("[Loadout] Found " << playerItems.Num() << " items in player inventory");
+        // === METHOD 2: GetAllPlayerItems() (returns ARadiusItemBase actors) ===
+        LOG_INFO("[Loadout] === METHOD 2: Trying GetAllPlayerItems() ===");
+        int method2Count = 0;
+        
+        if (playerPawn)
+        {
+            try
+            {
+                SDK::TArray<SDK::ARadiusItemBase*> itemActors;
+                bool success = containerSubsystem->GetAllPlayerItems(playerPawn, &itemActors);
+                method2Count = itemActors.Num();
+                LOG_INFO("[Loadout] GetAllPlayerItems returned " << success 
+                         << ", count=" << method2Count);
+                
+                // Log first few for debugging
+                for (int i = 0; i < itemActors.Num() && i < 5; i++)
+                {
+                    SDK::ARadiusItemBase* actor = itemActors[i];
+                    if (actor)
+                    {
+                        try
+                        {
+                            LOG_INFO("[Loadout]   ItemActor[" << i << "]: " << actor->Class->GetName()
+                                     << " at (" << actor->K2_GetActorLocation().X << "...)");
+                        }
+                        catch (...) { LOG_WARN("[Loadout]   ItemActor[" << i << "]: failed to read"); }
+                    }
+                }
+            }
+            catch (const std::exception& e)
+            {
+                LOG_ERROR("[Loadout] GetAllPlayerItems exception: " << e.what());
+            }
+            catch (...)
+            {
+                LOG_ERROR("[Loadout] GetAllPlayerItems unknown exception");
+            }
+        }
+        else
+        {
+            LOG_WARN("[Loadout] Cannot call GetAllPlayerItems - no player pawn");
+        }
+        
+        // === METHOD 3: Check container hierarchy ===
+        LOG_INFO("[Loadout] === METHOD 3: Checking container hierarchy ===");
+        
+        try
+        {
+            auto containers = containerSubsystem->GetContainers();
+            LOG_INFO("[Loadout] Total containers in subsystem: " << containers.Num());
+            
+            // Note: TMap iteration is tricky in this SDK, just log the count for now
+            // The main diagnostic info comes from METHOD 1 and METHOD 2
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Loadout] Container hierarchy check exception: " << e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("[Loadout] Container hierarchy check unknown exception");
+        }
+        
+        // === BUILD LOADOUT FROM COLLECTED ITEMS ===
+        LOG_INFO("[Loadout] === BUILDING LOADOUT ===");
+        
+        if (method1Count == 0)
+        {
+            LOG_ERROR("[Loadout] No items found via GetPlayersInventory - capture failed");
+            return "Error: No items found in player inventory. Check logs for details.";
+        }
         
         // Create loadout data
         LoadoutData loadout;
@@ -169,7 +372,27 @@ namespace Mod::Loadout
         timestampStream << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S");
         loadout.timestamp = timestampStream.str();
         
-        // Capture each item
+        // Build a set of all item UIDs for parent-child relationship detection
+        std::set<std::string> allItemUids;
+        for (int i = 0; i < playerItems.Num(); i++)
+        {
+            SDK::URadiusItemDynamicData* itemData = playerItems[i];
+            if (itemData)
+            {
+                try
+                {
+                    allItemUids.insert(itemData->InstanceUid.ToString());
+                }
+                catch (...) {}
+            }
+        }
+        
+        LOG_INFO("[Loadout] Built UID set with " << allItemUids.size() << " unique items");
+        
+        // Capture top-level items (items whose parent is NOT another inventory item)
+        int topLevelCount = 0;
+        int childCount = 0;
+        
         for (int i = 0; i < playerItems.Num(); i++)
         {
             SDK::URadiusItemDynamicData* itemData = playerItems[i];
@@ -180,48 +403,53 @@ namespace Mod::Loadout
             
             try
             {
-                LoadoutItem item = CaptureItemData(itemData);
+                std::string parentUid = itemData->ParentContainerUid.ToString();
                 
-                // Only add top-level items (items whose parent is the player inventory, not another item)
-                // We check if parent is a player container vs. another item
-                bool isTopLevel = true;
-                for (int j = 0; j < playerItems.Num(); j++)
-                {
-                    if (i == j) continue;
-                    SDK::URadiusItemDynamicData* otherItem = playerItems[j];
-                    if (!otherItem) continue;
-                    
-                    // Check if this item's parent is another item's UID
-                    if (item.parentContainerUid == otherItem->InstanceUid.ToString())
-                    {
-                        isTopLevel = false;
-                        break;
-                    }
-                }
+                // An item is top-level if its parent UID is NOT in our item set
+                // (meaning its parent is a player body slot, not another item)
+                bool isTopLevel = (allItemUids.find(parentUid) == allItemUids.end());
                 
                 if (isTopLevel)
                 {
+                    topLevelCount++;
+                    LoadoutItem item = CaptureItemData(itemData);
                     loadout.items.push_back(item);
-                    LOG_INFO("[Loadout] Captured top-level item: " << item.itemTypeTag 
-                             << " (UID: " << item.instanceUid << ")");
+                    
+                    int attachmentCount = item.attachments.size();
+                    LOG_INFO("[Loadout] Top-level item: " << item.itemTypeTag 
+                             << " (UID: " << item.instanceUid.substr(0, 8) << "..."
+                             << ", attachments: " << attachmentCount << ")");
+                }
+                else
+                {
+                    childCount++;
                 }
             }
             catch (const std::exception& e)
             {
                 LOG_ERROR("[Loadout] Exception capturing item: " << e.what());
             }
+            catch (...)
+            {
+                LOG_ERROR("[Loadout] Unknown exception capturing item");
+            }
         }
         
-        LOG_INFO("[Loadout] Captured " << loadout.items.size() << " top-level items");
+        LOG_INFO("[Loadout] Categorized: " << topLevelCount << " top-level, " << childCount << " child items");
+        LOG_INFO("[Loadout] Captured " << loadout.items.size() << " items into loadout");
         
         // Save to file
         if (!SaveLoadoutToFile(loadout))
         {
+            LOG_ERROR("[Loadout] Failed to save loadout file");
             return "Error: Failed to save loadout file";
         }
         
         std::ostringstream result;
         result << "Captured loadout '" << loadoutName << "' with " << loadout.items.size() << " items";
+        
+        LOG_INFO("[Loadout] ========== CAPTURE LOADOUT END ==========");
+        LOG_INFO("[Loadout] Result: " << result.str());
         
         // Show in-game feedback
         ModFeedback::ShowMessage(

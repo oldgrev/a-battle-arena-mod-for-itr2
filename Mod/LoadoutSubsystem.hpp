@@ -130,8 +130,10 @@ namespace Mod::Loadout
         int ClearPlayerLoadout(SDK::UWorld* world);
         
     private:
-        // Helper to recursively capture item data
-        LoadoutItem CaptureItemData(SDK::URadiusItemDynamicData* itemData);
+        // Helper to recursively capture item data (with correct relative transforms)
+        LoadoutItem CaptureItemData(SDK::URadiusItemDynamicData* itemData, 
+                                    SDK::URadiusContainerSubsystem* cs,
+                                    const std::map<std::string, SDK::AActor*>& itemActors);
         
         // Helper to get player's container subsystem
         SDK::URadiusContainerSubsystem* GetContainerSubsystem(SDK::UWorld* world) const;

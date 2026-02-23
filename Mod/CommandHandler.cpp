@@ -699,6 +699,36 @@ namespace Mod
                 Mod::HookManager::Trace_Flush();
                 return std::string("trace_dump_full: ") + Mod::HookManager::Trace_GetFilePath(); });
 
+            // Holster-focused trace shortcuts (high signal for loadout attachment debugging)
+            Register("holster_trace_on", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                     {
+                (void)world;
+                // Usage: holster_trace_on [objFilterSubstring]
+                // Defaults: fn filter = "holster" (catches StartHolstering/InstantHolsterActor/etc)
+                // Optional obj filter helps scope to molle/holder components.
+                Mod::HookManager::Trace_Reset();
+                Mod::HookManager::Trace_SetFilter("holster");
+
+                std::string objFilter;
+                if (!args.empty())
+                {
+                    objFilter = args[0];
+                    std::transform(objFilter.begin(), objFilter.end(), objFilter.begin(), ::tolower);
+                    if (objFilter == "none") objFilter.clear();
+                }
+                Mod::HookManager::Trace_SetObjectFilter(objFilter);
+                Mod::HookManager::Trace_SetEnabled(true);
+                return std::string("holster_trace_on: enabled (trace_path=") + Mod::HookManager::Trace_GetFilePath() + ")";
+            });
+
+            Register("holster_trace_off", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                     {
+                (void)world; (void)args;
+                Mod::HookManager::Trace_SetEnabled(false);
+                Mod::HookManager::Trace_Flush();
+                return std::string("holster_trace_off: disabled (flushed to ") + Mod::HookManager::Trace_GetFilePath() + ")";
+            });
+
         // -----------------------------------------------------------------
         // Loadout commands
         // -----------------------------------------------------------------

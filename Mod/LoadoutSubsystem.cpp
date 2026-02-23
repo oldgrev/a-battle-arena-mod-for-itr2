@@ -13,12 +13,21 @@ AILEARNINGS
 - GetTopParentContainerID() finds the root container for any item
 - GetAllPlayerItems() takes AActor* Player and fills TArray<ARadiusItemBase*>
 - Container hierarchy: Player -> ChestRig/Backpack -> Pouches -> Magazines/Boxes -> Ammo
+- Some inventory “container objects” returned by URadiusContainerSubsystem::GetContainerObject are UActorComponent holster components (no world transform); use GetOwner() to derive an anchor pose.
+- Some inventory “container objects” returned by URadiusContainerSubsystem::GetContainerObject are UActorComponent holster components (no world transform); use GetOwner() to derive an anchor pose.
+- UClass::GetFunction(ClassName, FuncName) only finds functions for an exact declaring class name; for unknown Blueprint-generated container classes (e.g. BPC_AS_Base_Molle_Vertical_S10) scan the class chain’s Children fields by function name instead.
+- For holster/holder containers, prefer calling StartHolstering(ItemActor, RelativeTransform) with the captured local transform; URadiusContainerSubsystem::InstantHolsterActor can snap items to an unexpected transform (observed as warping modules across the map).
 */
 
 #include "LoadoutSubsystem.hpp"
 #include "Logging.hpp"
 #include "GameContext.hpp"
 #include "ModFeedback.hpp"
+
+// These headers provide the parameter structs needed to call Blueprint functions via ProcessEvent
+// without linking the corresponding *_functions.cpp translation units.
+#include "..\\CppSDK\\SDK\\BPC_ItemHolster_parameters.hpp"
+#include "..\\CppSDK\\SDK\\BP_HolderVolume_parameters.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -27,6 +36,7 @@ AILEARNINGS
 #include <iomanip>
 #include <set>
 #include <functional>
+#include <cmath>
 
 namespace fs = std::filesystem;
 
@@ -390,6 +400,31 @@ namespace Mod::Loadout
         
         LOG_INFO("[Loadout] Built UID set with " << allItemUids.size() << " unique items");
         
+        // === Build Map of UID -> Actor using the item list and subsystem lookup ===
+        std::map<std::string, SDK::AActor*> itemActorMap;
+        if (containerSubsystem)
+        {
+            for (int i = 0; i < playerItems.Num(); i++)
+            {
+                SDK::URadiusItemDynamicData* itemData = playerItems[i];
+                if (itemData)
+                {
+                    try
+                    {
+                        std::string uid = itemData->InstanceUid.ToString();
+                        // This lookup is efficient enough for capture
+                        SDK::ARadiusItemBase* actor = containerSubsystem->GetItemByContainerID(itemData->InstanceUid);
+                        if (actor)
+                        {
+                            itemActorMap[uid] = actor;
+                        }
+                    }
+                    catch (...) {}
+                }
+            }
+            LOG_INFO("[Loadout] Mapped " << itemActorMap.size() << " item actors from inventory list");
+        }
+
         // Capture top-level items (items whose parent is NOT another inventory item)
         int topLevelCount = 0;
         int childCount = 0;
@@ -413,11 +448,11 @@ namespace Mod::Loadout
                 if (isTopLevel)
                 {
                     topLevelCount++;
-                    LoadoutItem item = CaptureItemData(itemData);
+                    LoadoutItem item = CaptureItemData(itemData, containerSubsystem, itemActorMap);
                     loadout.items.push_back(item);
                     
                     int attachmentCount = item.attachments.size();
-                    LOG_INFO("[Loadout] Top-level item: " << item.itemTypeTag 
+                    LOG_INFO("[Loadout] Captured Top-level item: " << item.itemTypeTag 
                              << " (UID: " << item.instanceUid.substr(0, 8) << "..."
                              << ", attachments: " << attachmentCount << ")");
                 }
@@ -461,7 +496,9 @@ namespace Mod::Loadout
         return result.str();
     }
     
-    LoadoutItem LoadoutSubsystem::CaptureItemData(SDK::URadiusItemDynamicData* itemData)
+    LoadoutItem LoadoutSubsystem::CaptureItemData(SDK::URadiusItemDynamicData* itemData, 
+                                                SDK::URadiusContainerSubsystem* cs,
+                                                const std::map<std::string, SDK::AActor*>& itemActors)
     {
         LoadoutItem item;
         
@@ -484,22 +521,64 @@ namespace Mod::Loadout
         item.durability = itemData->Durability;
         
         // Transform
-        // DynamicTransform contains FConfirmedDynamicTransform with DynamicLocation and DynamicRotation
+        // Default to DynamicTransform (likely World Space)
         SDK::FVector loc;
         SDK::FRotator rot;
         SDK::FVector scale{1.0f, 1.0f, 1.0f};
         
         if (itemData->DynamicTransform.bInitializedWithValues)
         {
-            // DynamicLocation and DynamicRotation are FVector_NetQuantize which inherit from FVector
             loc.X = itemData->DynamicTransform.DynamicLocation.X;
             loc.Y = itemData->DynamicTransform.DynamicLocation.Y;
             loc.Z = itemData->DynamicTransform.DynamicLocation.Z;
             
-            // DynamicRotation is stored as a vector (Pitch, Yaw, Roll)
             rot.Pitch = static_cast<double>(itemData->DynamicTransform.DynamicRotation.X);
             rot.Yaw = static_cast<double>(itemData->DynamicTransform.DynamicRotation.Y);
             rot.Roll = static_cast<double>(itemData->DynamicTransform.DynamicRotation.Z);
+        }
+
+        // Try to get actual relative transform from Actor if available
+        try
+        {
+            auto it = itemActors.find(item.instanceUid);
+            if (it != itemActors.end() && it->second)
+            {
+                SDK::AActor* actor = it->second;
+                SDK::USceneComponent* root = actor->RootComponent;
+                if (root)
+                {
+                    // Check if attached
+                    SDK::USceneComponent* attachParent = root->AttachParent;
+                    if (attachParent)
+                    {
+                        // It is attached, so RelativeLocation/Rotation are valid relative to parent
+                        loc = root->RelativeLocation;
+                        rot = root->RelativeRotation;
+                        scale = root->RelativeScale3D;
+                        LOG_INFO("[Loadout] Captured RELATIVE transform for " << item.itemTypeTag 
+                                 << ": " << loc.X << "," << loc.Y << "," << loc.Z);
+                    }
+                    else
+                    {
+                        // Not attached - it is in world space.
+                        // However, loadouts are practically useless if storing absolute world coordinates
+                        // unless we are creating a level editor. For player equipment, we usually want relative.
+                        // If we are falling through here for equipment, something is wrong with attachment detection
+                        // or the item is floating.
+                        
+                        // We will log a warning but still save it.
+                        // Maybe we should try to calculate relative to player if possible?
+                        // No, let's stick to what the engine reports.
+                        LOG_WARN("[Loadout] Item " << item.itemTypeTag << " (ID: " << item.instanceUid.substr(0, 8) 
+                                 << ") has actor but NO attach parent. Using World/Dynamic transform: "
+                                 << loc.X << "," << loc.Y << "," << loc.Z);
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            LOG_WARN("[Loadout] Failed to access actor transform for " << item.instanceUid);
         }
         
         item.transform.posX = loc.X;
@@ -564,7 +643,8 @@ namespace Mod::Loadout
             SDK::URadiusItemDynamicData* attachment = itemData->Attachments[i];
             if (attachment)
             {
-                LoadoutItem attachmentItem = CaptureItemData(attachment);
+                // Recursive pass of the same map
+                LoadoutItem attachmentItem = CaptureItemData(attachment, cs, itemActors);
                 item.attachments.push_back(attachmentItem);
             }
         }
@@ -1042,10 +1122,241 @@ namespace Mod::Loadout
 
     // ---------------------------------------------------------------------------
     // SpawnItem  -  spawns an item in the world (does NOT attach it).
-    //              Item is placed slightly in front of the player so
-    //              it doesn't immediately clip into geometry.
+    //              Prefer spawning near the parent container (so physics/
+    //              registration behaves more like a natural placement), with
+    //              a player-forward fallback when we can't resolve a parent.
     // ---------------------------------------------------------------------------
-    static SDK::AActor* SpawnItem(SDK::UWorld* world, const LoadoutItem& item)
+    static SDK::FVector RotateVectorByRotator(const SDK::FVector& v, const SDK::FRotator& r)
+    {
+        // Unreal uses degrees. Approx rotation order: Yaw(Z) -> Pitch(Y) -> Roll(X)
+        const double degToRad = 3.14159265358979323846 / 180.0;
+        const double yaw = r.Yaw * degToRad;
+        const double pitch = r.Pitch * degToRad;
+        const double roll = r.Roll * degToRad;
+
+        const double cy = std::cos(yaw);
+        const double sy = std::sin(yaw);
+        const double cp = std::cos(pitch);
+        const double sp = std::sin(pitch);
+        const double cr = std::cos(roll);
+        const double sr = std::sin(roll);
+
+        // Yaw (Z)
+        const double x1 = v.X * cy - v.Y * sy;
+        const double y1 = v.X * sy + v.Y * cy;
+        const double z1 = v.Z;
+
+        // Pitch (Y)
+        const double x2 = x1 * cp + z1 * sp;
+        const double y2 = y1;
+        const double z2 = -x1 * sp + z1 * cp;
+
+        // Roll (X)
+        const double x3 = x2;
+        const double y3 = y2 * cr - z2 * sr;
+        const double z3 = y2 * sr + z2 * cr;
+
+        SDK::FVector out;
+        out.X = static_cast<float>(x3);
+        out.Y = static_cast<float>(y3);
+        out.Z = static_cast<float>(z3);
+        return out;
+    }
+
+    static bool TryGetObjectWorldPose(SDK::UObject* obj, SDK::FVector& outLoc, SDK::FRotator& outRot)
+    {
+        if (!obj)
+        {
+            return false;
+        }
+
+        // Many container "objects" are scene components.
+        try
+        {
+            if (obj->IsA(SDK::USceneComponent::StaticClass()))
+            {
+                auto* comp = static_cast<SDK::USceneComponent*>(obj);
+                outLoc = comp->K2_GetComponentLocation();
+                outRot = comp->K2_GetComponentRotation();
+                return true;
+            }
+        }
+        catch (...) {}
+
+        // Some containers are holster components (UActorComponent), which don't have a transform
+        // but their owner actor does.
+        try
+        {
+            if (obj->IsA(SDK::UActorComponent::StaticClass()))
+            {
+                auto* comp = static_cast<SDK::UActorComponent*>(obj);
+                SDK::AActor* owner = comp->GetOwner();
+                if (owner)
+                {
+                    outLoc = owner->K2_GetActorLocation();
+                    outRot = owner->K2_GetActorRotation();
+                    return true;
+                }
+            }
+        }
+        catch (...) {}
+
+        // Some may be actors.
+        try
+        {
+            if (obj->IsA(SDK::AActor::StaticClass()))
+            {
+                auto* actor = static_cast<SDK::AActor*>(obj);
+                outLoc = actor->K2_GetActorLocation();
+                outRot = actor->K2_GetActorRotation();
+                return true;
+            }
+        }
+        catch (...) {}
+
+        return false;
+    }
+
+    static SDK::UFunction* FindFunctionByNameInClassChain(SDK::UClass* cls, const char* funcName)
+    {
+        if (!cls || !funcName)
+            return nullptr;
+
+        for (SDK::UStruct* s = cls; s; s = s->SuperStruct)
+        {
+            for (SDK::UField* f = s->Children; f; f = f->Next)
+            {
+                if (!f)
+                    continue;
+                if (!f->HasTypeFlag(SDK::EClassCastFlags::Function))
+                    continue;
+                if (f->GetName() == funcName)
+                    return static_cast<SDK::UFunction*>(f);
+            }
+        }
+        return nullptr;
+    }
+
+    static bool TryStartHolsteringWithRelativeTransform(SDK::UObject* container, SDK::AActor* actor, const SDK::FTransform& relativeTransform)
+    {
+        if (!container || !actor || !container->Class)
+        {
+            return false;
+        }
+
+        SDK::UFunction* fn = nullptr;
+        try
+        {
+            fn = FindFunctionByNameInClassChain(container->Class, "StartHolstering");
+        }
+        catch (...) { fn = nullptr; }
+
+        if (!fn)
+        {
+            return false;
+        }
+
+        // Generic parms layout for StartHolstering(AActor* ItemActor, const FTransform& RelativeTransform)
+        // Matches the Dumper-7 generated params for known holster implementations.
+        struct GenericStartHolsteringParms
+        {
+            SDK::AActor* ItemActor;
+            uint8_t Pad_8[0x8];
+            SDK::FTransform RelativeTransform;
+        };
+
+        try
+        {
+            GenericStartHolsteringParms parms{};
+            parms.ItemActor = actor;
+            parms.RelativeTransform = relativeTransform;
+            container->ProcessEvent(fn, &parms);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    static bool TryInstantHolsterWithRelativeTransform(SDK::UObject* container, SDK::AActor* actor, SDK::FTransform& inOutRelativeTransform)
+    {
+        if (!container || !actor || !container->Class)
+            return false;
+
+        SDK::UFunction* fn = nullptr;
+        try { fn = FindFunctionByNameInClassChain(container->Class, "InstantHolsterActor"); }
+        catch (...) { fn = nullptr; }
+
+        if (!fn)
+            return false;
+
+        // Layout matches ItemContainerInterface_InstantHolsterActor (Assertions.inl): size 0x70, RelativeTransform at 0x10
+        struct Parms
+        {
+            SDK::AActor* ItemActor;
+            uint8_t Pad_8[0x8];
+            SDK::FTransform RelativeTransform;
+        };
+        static_assert(sizeof(Parms) == 0x70, "InstantHolsterActor parms size mismatch");
+
+        try
+        {
+            Parms parms{};
+            parms.ItemActor = actor;
+            parms.RelativeTransform = inOutRelativeTransform;
+            container->ProcessEvent(fn, &parms);
+            inOutRelativeTransform = parms.RelativeTransform;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    static bool TryPutItemToContainerWithRelativeTransform(SDK::UObject* container, SDK::AActor* actor, SDK::FTransform& inOutRelativeTransform)
+    {
+        if (!container || !actor || !container->Class)
+            return false;
+
+        SDK::UFunction* fn = nullptr;
+        try { fn = FindFunctionByNameInClassChain(container->Class, "PutItemToContainer"); }
+        catch (...) { fn = nullptr; }
+
+        if (!fn)
+            return false;
+
+        // Layout matches ItemContainerInterface_PutItemToContainer (Assertions.inl): size 0x80, ReturnValue at 0x70
+        struct Parms
+        {
+            SDK::AActor* ItemActor;
+            uint8_t Pad_8[0x8];
+            SDK::FTransform RelativeTransform;
+            bool ReturnValue;
+            uint8_t Pad_71[0xF];
+        };
+        static_assert(sizeof(Parms) == 0x80, "PutItemToContainer parms size mismatch");
+
+        try
+        {
+            Parms parms{};
+            parms.ItemActor = actor;
+            parms.RelativeTransform = inOutRelativeTransform;
+            parms.ReturnValue = false;
+            container->ProcessEvent(fn, &parms);
+            inOutRelativeTransform = parms.RelativeTransform;
+            return parms.ReturnValue;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    static SDK::AActor* SpawnItem(SDK::UWorld* world, const LoadoutItem& item, SDK::UObject* spawnNear)
     {
         if (item.itemTypeTag.empty())
         {
@@ -1057,23 +1368,55 @@ namespace Mod::Loadout
         SDK::FGameplayTag typeTag;
         typeTag.TagName = SDK::BasicFilesImpleUtils::StringToName(wideTag.c_str());
 
-        SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
-        SDK::FVector loc{0, 0, 0};
-        SDK::FRotator rot{0, 0, 0};
-        SDK::FVector scale{1, 1, 1};
+        SDK::FVector anchorLoc{0, 0, 0};
+        SDK::FRotator anchorRot{0, 0, 0};
+        bool haveAnchor = TryGetObjectWorldPose(spawnNear, anchorLoc, anchorRot);
 
-        if (playerPawn)
+        if (!haveAnchor)
         {
-            SDK::FVector pLoc = playerPawn->K2_GetActorLocation();
-            SDK::FRotator pRot = playerPawn->K2_GetActorRotation();
-            SDK::FVector fwd = SDK::UKismetMathLibrary::GetForwardVector(pRot);
-            // Place 100 cm ahead, 10 cm above feet - keeps it accessible if attach fails
-            loc.X = pLoc.X + fwd.X * 100.0f;
-            loc.Y = pLoc.Y + fwd.Y * 100.0f;
-            loc.Z = pLoc.Z + 10.0f;
+            SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+            if (playerPawn)
+            {
+                anchorLoc = playerPawn->K2_GetActorLocation();
+                anchorRot = playerPawn->K2_GetActorRotation();
+            }
         }
 
-        SDK::FTransform spawnTransform = SDK::UKismetMathLibrary::MakeTransform(loc, rot, scale);
+        // item.transform is LOCAL to its parent container.
+        SDK::FVector localPos(item.transform.posX, item.transform.posY, item.transform.posZ);
+        SDK::FRotator localRot(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll);
+        SDK::FVector localScale(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ);
+
+        SDK::FVector worldLoc = anchorLoc;
+        SDK::FRotator worldRot = anchorRot;
+        LOG_INFO("[Loadout] Spawning item '" << item.itemTypeTag << "' near " 
+                 << (spawnNear ? spawnNear->GetName() : "null") 
+                 << " with local offset " << localPos.X << "," << localPos.Y << "," << localPos.Z);
+        LOG_INFO("[Loadout] Anchor location: " << anchorLoc.X << "," << anchorLoc.Y << "," << anchorLoc.Z
+                 << " rotation: " << anchorRot.Pitch << "," << anchorRot.Yaw << "," << anchorRot.Roll);
+
+
+        if (haveAnchor)
+        {
+            LOG_INFO("[Loadout] Applying local offset to anchor...");
+            // Approximate initial world placement at parent + local offset.
+            SDK::FVector rotatedOffset = RotateVectorByRotator(localPos, anchorRot);
+            worldLoc.X += rotatedOffset.X;
+            worldLoc.Y += rotatedOffset.Y;
+            worldLoc.Z += rotatedOffset.Z;
+
+            worldRot.Pitch += localRot.Pitch;
+            worldRot.Yaw += localRot.Yaw;
+            worldRot.Roll += localRot.Roll;
+        }
+        else
+        {
+            LOG_INFO("[Loadout] No anchor found, using default world location...");
+        }
+
+        SDK::FTransform spawnTransform = SDK::UKismetMathLibrary::MakeTransform(worldLoc, worldRot, localScale);
+        LOG_INFO("[Loadout] Spawn transform location: " << spawnTransform.Translation.X << "," << spawnTransform.Translation.Y << "," << spawnTransform.Translation.Z
+            << " rotation: " << spawnTransform.Rotation.X << "," << spawnTransform.Rotation.Y << "," << spawnTransform.Rotation.Z << "," << spawnTransform.Rotation.W);
 
         SDK::FItemConfiguration cfg{};
         cfg.bShopItem = false;
@@ -1117,7 +1460,9 @@ namespace Mod::Loadout
     static bool AttachToContainer(SDK::URadiusContainerSubsystem* cs,
                                   SDK::UObject* container,
                                   SDK::AActor* actor,
-                                  const std::string& label)
+                                  const std::string& label,
+                                  const SDK::FTransform* desiredRelativeTransform,
+                                  SDK::UWorld* world)
     {
         if (!container || !actor)
         {
@@ -1125,10 +1470,115 @@ namespace Mod::Loadout
             return false;
         }
 
+        const std::string clsName = (container && container->Class) ? container->Class->GetName() : std::string("<no-class>");
+        std::string clsLower = clsName;
+        std::transform(clsLower.begin(), clsLower.end(), clsLower.begin(), ::tolower);
+
+        // Prefer container-native holstering with an explicit relative transform when available.
+        // This is especially important for modular vest/backpack attachment slots, where
+        // URadiusContainerSubsystem::InstantHolsterActor has been observed to warp items.
+        if (desiredRelativeTransform)
+        {
+            try
+            {
+                // Molle slots: InstantHolsterActor is the warp source; prefer PutItemToContainer first.
+                if (clsLower.find("molle") != std::string::npos)
+                {
+                    LOG_INFO("[Loadout] AttachToContainer: molle container detected (" << clsName << "), trying PutItemToContainer first for " << label);
+                    bool ok = false;
+                    try
+                    {
+                        ok = cs->PutItemToContainer(container, actor);
+                    }
+                    catch (...) { ok = false; }
+
+                    if (ok)
+                    {
+                        // Now that we're attached, apply the captured relative transform.
+                        SDK::FHitResult hit{};
+                        actor->K2_SetActorRelativeTransform(*desiredRelativeTransform, false, &hit, true);
+                        LOG_INFO("[Loadout] Attached via PutItemToContainer + SetRelativeTransform: " << label);
+                        return true;
+                    }
+                    LOG_WARN("[Loadout] PutItemToContainer failed on molle container; will try other paths: " << label);
+                }
+
+                LOG_INFO("[Loadout] AttachToContainer: trying StartHolstering on container class=" << clsName << " for " << label);
+
+                if (TryStartHolsteringWithRelativeTransform(container, actor, *desiredRelativeTransform))
+                {
+                    LOG_INFO("[Loadout] Attached via StartHolstering (relative transform): " << label);
+                    return true;
+                }
+
+                // Next best: container-local InstantHolsterActor(ItemActor, RelativeTransform*)
+                SDK::FTransform rel = *desiredRelativeTransform;
+                LOG_INFO("[Loadout] AttachToContainer: trying container.InstantHolsterActor(rel) for " << label);
+                if (TryInstantHolsterWithRelativeTransform(container, actor, rel))
+                {
+                    LOG_INFO("[Loadout] Attached via container.InstantHolsterActor(rel): " << label);
+                    return true;
+                }
+
+                // Next: container-local PutItemToContainer(ItemActor, RelativeTransform*)
+                rel = *desiredRelativeTransform;
+                LOG_INFO("[Loadout] AttachToContainer: trying container.PutItemToContainer(rel) for " << label);
+                if (TryPutItemToContainerWithRelativeTransform(container, actor, rel))
+                {
+                    LOG_INFO("[Loadout] Attached via container.PutItemToContainer(rel): " << label);
+                    return true;
+                }
+
+                LOG_INFO("[Loadout] AttachToContainer: no container-local holster functions worked; will fall back to subsystem attach: " << label);
+            }
+            catch (...)
+            {
+                LOG_WARN("[Loadout] StartHolstering ProcessEvent threw for " << label);
+            }
+        }
+
         try
         {
+            SDK::FVector beforeLoc{};
+            try { beforeLoc = actor->K2_GetActorLocation(); } catch (...) {}
+
+            LOG_INFO("[Loadout] World Location before InstantHolsterActor: " 
+                     << beforeLoc.X << "," 
+                     << beforeLoc.Y << "," 
+                     << beforeLoc.Z);
             cs->InstantHolsterActor(container, actor);
             LOG_INFO("[Loadout] Attached via InstantHolsterActor: " << label);
+            // print the world location to the log, if the location doesnt change, then the location has to be changed first
+            SDK::FVector afterLoc{};
+            try { afterLoc = actor->K2_GetActorLocation(); } catch (...) {}
+            LOG_INFO("[Loadout] World Location after InstantHolsterActor: " 
+                     << afterLoc.X << "," 
+                     << afterLoc.Y << "," 
+                     << afterLoc.Z);
+
+            // If InstantHolsterActor warped the item to an extreme distance, treat as failure.
+            // (This happens for some modular vest molle slots; it snaps to a different container.)
+            if (desiredRelativeTransform)
+            {
+                try
+                {
+                    SDK::APawn* playerPawn = GameContext::GetPlayerPawn(world);
+                    if (playerPawn)
+                    {
+                        SDK::FVector p = playerPawn->K2_GetActorLocation();
+                        const float dx = afterLoc.X - p.X;
+                        const float dy = afterLoc.Y - p.Y;
+                        const float dz = afterLoc.Z - p.Z;
+                        const float distSq = dx*dx + dy*dy + dz*dz;
+                        if (distSq > 250000000.0f) // 50000 uu
+                        {
+                            LOG_ERROR("[Loadout] InstantHolsterActor warp detected (distSq=" << distSq << ") for " << label << "; will fall back");
+                            return false;
+                        }
+                    }
+                }
+                catch (...) {}
+            }
             return true;
         }
         catch (const std::exception& e)
@@ -1245,7 +1695,7 @@ namespace Mod::Loadout
         const LoadoutItem& item,
         SDK::UObject* parentContainer)
     {
-        SDK::AActor* actor = SpawnItem(world, item);
+        SDK::AActor* actor = SpawnItem(world, item, parentContainer);
         if (actor && parentContainer)
         {
             // build transform from capture
@@ -1254,7 +1704,8 @@ namespace Mod::Loadout
                 SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
                 SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
             );
-            AttachToContainer(containerSubsystem, parentContainer, actor, item.itemTypeTag);
+
+            AttachToContainer(containerSubsystem, parentContainer, actor, item.itemTypeTag, &relTransform, world);
             // apply relative transform after attachment
             if (parentContainer && actor)
             {
@@ -1342,8 +1793,18 @@ namespace Mod::Loadout
             flattenInto(loadout.items);
         }
 
-        LOG_INFO("[Loadout] Pending items to spawn: " << (int)pending.size());
-
+         LOG_INFO("[Loadout] Pending items to spawn: " << (int)pending.size());
+         LOG_INFO("[Loadout] Step 3 complete: " << (int)pending.size() << " items pending spawn");
+         LOG_INFO("[Loadout] NOTE: saved transform values are LOCAL offsets/rotations relative to their parent container.");
+        for (int i = 0; i < (int)pending.size(); i++)
+        {
+            const auto& it = pending[i];
+            LOG_INFO("[Loadout]   pending[" << i << "] type=" << it.itemTypeTag
+                     << " parent=" << it.parentContainerUid
+                << " localPos=(" << it.transform.posX
+                     << "," << it.transform.posY
+                     << "," << it.transform.posZ << ")");
+        }
         // oldUid -> new container ID (from inventory snapshot diff)
         std::map<std::string, std::string> uidMap;
 
@@ -1429,11 +1890,24 @@ namespace Mod::Loadout
                     continue;
                 }
 
+                LOG_INFO("[Loadout] [Pass " << pass << "] --- Item: " << item.itemTypeTag);
+                LOG_INFO("[Loadout]   uid=" << item.instanceUid
+                         << " parent=" << item.parentContainerUid);
+                LOG_INFO("[Loadout]   localPos=("
+                         << item.transform.posX << ","
+                         << item.transform.posY << ","
+                         << item.transform.posZ << ")"
+                         << " localRot=("
+                         << item.transform.rotPitch << ","
+                         << item.transform.rotYaw << ","
+                         << item.transform.rotRoll << ")");
+                LOG_INFO("[Loadout]   parentContainer=" << (void*)parentContainer);
+
                 // --- Snapshot before spawn ---
                 std::set<std::string> snapBefore = SnapshotInventory(cs);
 
                 // --- Spawn the item ---
-                SDK::AActor* actor = SpawnItem(world, item);
+                SDK::AActor* actor = SpawnItem(world, item, parentContainer);
                 if (!actor)
                 {
                     LOG_ERROR("[Loadout] Spawn failed: " << item.itemTypeTag);
@@ -1441,6 +1915,15 @@ namespace Mod::Loadout
                     // Don't re-queue; move on.
                     continue;
                 }
+
+                // Log world position immediately after spawn (should be ~100cm in front of player)
+                try
+                {
+                    SDK::FVector spawnPos = actor->K2_GetActorLocation();
+                    LOG_INFO("[Loadout]   post-spawn worldPos=("
+                             << spawnPos.X << "," << spawnPos.Y << "," << spawnPos.Z << ")");
+                }
+                catch (...) { LOG_WARN("[Loadout]   Could not read post-spawn worldPos"); }
 
                 // --- Attach to parent container ---
                 if (parentContainer)
@@ -1450,13 +1933,87 @@ namespace Mod::Loadout
                         SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
                         SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
                     );
-                    AttachToContainer(cs, parentContainer, actor, item.itemTypeTag);
-                    if (parentContainer && actor)
+                    
+                    // // We must attach first, because SetRelativeTransform requires a parent to be relative TO.
+                    // // Note: PutItemToContainer often resets the transform to the socket default.
+                    // // AttachToContainer(cs, parentContainer, actor, item.itemTypeTag);
+                    // if (parentContainer && actor)
+                    // {
+                    //     // Now apply the captured relative transform.
+                    //     SDK::FHitResult hit{};
+                    //     actor->K2_SetActorRelativeTransform(relTransform, false, &hit, true);
+                        
+                    //     LOG_INFO("[Loadout] Applied relative transform on " << item.itemTypeTag 
+                    //              << " Loc: " << item.transform.posX << "," << item.transform.posY << "," << item.transform.posZ);
+
+                    //     try
+                    //     {
+                    //         SDK::FVector postAttachPos = actor->K2_GetActorLocation();
+                    //         LOG_INFO("[Loadout]   post-attach worldPos=("
+                    //                  << postAttachPos.X << ","
+                    //                  << postAttachPos.Y << ","
+                    //                  << postAttachPos.Z << ")");
+                    //     }
+                    //     catch (...) { LOG_WARN("[Loadout]   Could not read post-attach worldPos"); }
+                    // }
+
+                    // that trash is all wrong, objects need to be moved to the correct position BEFORE being attached, so get the parentContainer's world position, work out what the local transform of the object does to that, and then combine them and set the world location of the object to that, AND THEN ATTACH
+                    // first get the parentContainer world cooords
+                    if (parentContainer)
                     {
-                        SDK::FHitResult hit{};
-                        actor->K2_SetActorRelativeTransform(relTransform, false, &hit, true);
-                        LOG_INFO("[Loadout] Applied relative transform on " << item.itemTypeTag);
+                        SDK::FVector parentWorldLoc;
+                        SDK::FRotator parentWorldRot;
+                        if (TryGetObjectWorldPose(parentContainer, parentWorldLoc, parentWorldRot))
+                        {
+                            // calculate the desired world transform of the item based on the captured local transform and the parent's world transform
+                            SDK::FVector desiredWorldLoc = parentWorldLoc;
+                            SDK::FRotator desiredWorldRot = parentWorldRot;
+
+                            // apply the local offset/rotation to get the desired world transform
+                            SDK::FVector rotatedOffset = RotateVectorByRotator(
+                                SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
+                                parentWorldRot);
+                            desiredWorldLoc.X += rotatedOffset.X;
+                            desiredWorldLoc.Y += rotatedOffset.Y;
+                            desiredWorldLoc.Z += rotatedOffset.Z;
+
+                            desiredWorldRot.Pitch += item.transform.rotPitch;
+                            desiredWorldRot.Yaw += item.transform.rotYaw;
+                            desiredWorldRot.Roll += item.transform.rotRoll;
+
+                            // set the item's world transform to the desired location before attaching
+                            try
+                            {
+                                // usage is:
+                                // bool K2_SetActorLocation(const struct FVector& NewLocation, bool bSweep, struct FHitResult* SweepHitResult, bool bTeleport);
+                                actor->K2_SetActorLocation(desiredWorldLoc, false, nullptr, true);
+                                actor->K2_SetActorRotation(desiredWorldRot, false);
+                                LOG_INFO("[Loadout] Moved item to pre-attach world position: "
+                                         << desiredWorldLoc.X << "," << desiredWorldLoc.Y << "," << desiredWorldLoc.Z);
+                            }
+                            catch (...)
+                            {
+                                LOG_WARN("[Loadout] Failed to set pre-attach world position");
+                            }
+                        }
+                        else
+                        {
+                            LOG_WARN("[Loadout] Could not get parent container world pose");
+                        }
+
+                        const SDK::FTransform* attachRel = nullptr;
+                        if (!baseUid.empty())
+                        {
+                            // Only item-slot attachments should use the explicit relative-transform holster path.
+                            // Player body-slot holsters are left on the subsystem InstantHolsterActor path.
+                            attachRel = &relTransform;
+                        }
+                        AttachToContainer(cs, parentContainer, actor, item.itemTypeTag, attachRel, world);
+
                     }
+
+
+
                 }
                 // (If parentContainer is nullptr, item sits in front of player - acceptable fallback)
 
@@ -1506,26 +2063,9 @@ namespace Mod::Loadout
         {
             LOG_WARN("[Loadout] Last-resort spawn in front of player: " << item.itemTypeTag
                      << " (parent=" << item.parentContainerUid << ")");
-            SDK::AActor* actor = SpawnItem(world, item);
+            SDK::AActor* actor = SpawnItem(world, item, nullptr);
             if (actor)
             {
-                // apply captured world transform as a final adjustment
-                SDK::FTransform worldTransform = SDK::UKismetMathLibrary::MakeTransform(
-                    SDK::FVector(item.transform.posX, item.transform.posY, item.transform.posZ),
-                    SDK::FRotator(item.transform.rotPitch, item.transform.rotYaw, item.transform.rotRoll),
-                    SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
-                );
-                try
-                {
-                    SDK::FHitResult hit{};
-                    actor->K2_SetActorTransform(worldTransform, false, &hit, true);
-                    LOG_INFO("[Loadout] Applied world transform on fallback item " << item.itemTypeTag);
-                }
-                catch (...)
-                {
-                    LOG_WARN("[Loadout] Failed to set world transform on fallback item");
-                }
-
                 spawnedCount++;
             }
             else

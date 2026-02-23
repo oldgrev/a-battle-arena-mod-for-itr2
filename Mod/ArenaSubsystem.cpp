@@ -31,6 +31,7 @@ AILEARNINGS
 - Arena: Spawns/teleports now avoid the player's line-of-sight (view-cone + visibility trace) by retrying further away and/or to the side; teleports rotate NPCs to face the player.
 - Arena: Anti-stuck will not mark an NPC as stuck, teleport it, or cull it if the NPC is currently in the player's view (prevents visible pop-outs).
 - Arena: Core arena tuning values (defaults, intervals, stuck timers, distances) are centralized in ModTuning.hpp for faster iteration.
+- Arena: Added optional placement rule to prevent spawning/teleporting NPCs at locations where they have line-of-sight to the player; uses a 5x5 behind-grid probe with rear-corner retries (toggle in ModTuning.hpp).
 */
 
 #include "ArenaSubsystem.hpp"
@@ -180,6 +181,217 @@ namespace Mod::Arena
 
         const float distToEnd = SDK::UKismetMathLibrary::Vector_Distance(hit.ImpactPoint, traceEnd);
         return distToEnd < Mod::Tuning::kArenaLoSVisibilityHitNearEndDistance;
+    }
+
+    // Returns true if a hypothetical NPC at `location` would likely have an unobstructed visibility trace
+    // to the player's current view point.
+    static bool DoesLocationHaveLineOfSightToPlayer(SDK::UWorld* world, const SDK::FVector& location)
+    {
+        if (!world)
+        {
+            return false;
+        }
+
+        SDK::FVector viewLoc{};
+        SDK::FRotator viewRot{};
+        if (!Mod::GameContext::GetPlayerView(world, viewLoc, viewRot))
+        {
+            // If we can't determine player view, don't over-reject placements.
+            return false;
+        }
+
+        SDK::FVector traceStart = AddZ(location, Mod::Tuning::kArenaNoSeePlayerTraceStartZOffset);
+        SDK::FVector traceEnd = AddZ(viewLoc, Mod::Tuning::kArenaLoSVisibilityTraceEndZOffset);
+
+        SDK::TArray<SDK::AActor*> ignore;
+        SDK::FHitResult hit{};
+        const bool hitSomething = SDK::UKismetSystemLibrary::LineTraceSingle(
+            world,
+            traceStart,
+            traceEnd,
+            SDK::ETraceTypeQuery::TraceTypeQuery1,
+            false,
+            ignore,
+            SDK::EDrawDebugTrace::None,
+            &hit,
+            true,
+            SDK::FLinearColor{},
+            SDK::FLinearColor{},
+            0.0f);
+
+        if (!hitSomething || !hit.bBlockingHit)
+        {
+            return true;
+        }
+
+        const float distToEnd = SDK::UKismetMathLibrary::Vector_Distance(hit.ImpactPoint, traceEnd);
+        return distToEnd < Mod::Tuning::kArenaLoSVisibilityHitNearEndDistance;
+    }
+
+    static bool TryProjectToGround(SDK::UWorld* world, SDK::APawn* playerPawn, SDK::FVector& inOut)
+    {
+        if (!world)
+        {
+            return false;
+        }
+
+        SDK::FVector traceStart = { inOut.X, inOut.Y, inOut.Z + Mod::Tuning::kArenaGroundTraceUp };
+        SDK::FVector traceEnd   = { inOut.X, inOut.Y, inOut.Z - Mod::Tuning::kArenaGroundTraceDown };
+        SDK::FHitResult hit{};
+        SDK::TArray<SDK::AActor*> ignore;
+        if (playerPawn)
+        {
+            ignore.Add(playerPawn);
+        }
+
+        if (!SDK::UKismetSystemLibrary::LineTraceSingle(
+                world,
+                traceStart,
+                traceEnd,
+                SDK::ETraceTypeQuery::TraceTypeQuery1,
+                false,
+                ignore,
+                SDK::EDrawDebugTrace::None,
+                &hit,
+                true,
+                SDK::FLinearColor{},
+                SDK::FLinearColor{},
+                0.0f))
+        {
+            return false;
+        }
+
+        inOut.Z = hit.ImpactPoint.Z + Mod::Tuning::kArenaGroundSpawnZOffset;
+        return true;
+    }
+
+    static bool IsInEscapeDirectionSafe(const SDK::FVector& playerLoc, const SDK::FVector& location)
+    {
+        if (g_Arena)
+        {
+            return g_Arena->IsInEscapeDirection(playerLoc, location);
+        }
+        return false;
+    }
+
+    static bool TryFindPlacementWhereNpcCannotSeePlayer(
+        SDK::UWorld* world,
+        SDK::APawn* playerPawn,
+        const SDK::FVector& playerLoc,
+        const SDK::FVector& baseLocation,
+        SDK::FVector& outLocation)
+    {
+        outLocation = baseLocation;
+
+        if (!Mod::Tuning::kArenaAvoidNpcSeeingPlayer)
+        {
+            return true;
+        }
+
+        // If the base location already blocks visibility to the player, accept it.
+        if (!DoesLocationHaveLineOfSightToPlayer(world, baseLocation))
+        {
+            return true;
+        }
+
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> coin(0, 1);
+
+        const int gridSize = Mod::Tuning::kArenaNoSeePlayerGridSize;
+        const int half = (gridSize - 1) / 2;
+        const float cell = Mod::Tuning::kArenaNoSeePlayerGridCellSize;
+
+        SDK::FVector currentBase = baseLocation;
+
+        // We repeat by re-centering on a rear corner when no grid point works.
+        for (int repeat = 0; repeat < Mod::Tuning::kArenaNoSeePlayerMaxRepeats; ++repeat)
+        {
+            SDK::FVector rearDir;
+            rearDir.X = currentBase.X - playerLoc.X;
+            rearDir.Y = currentBase.Y - playerLoc.Y;
+            rearDir.Z = 0.0f;
+
+            const double lenSq = (double)rearDir.X * (double)rearDir.X + (double)rearDir.Y * (double)rearDir.Y;
+            if (lenSq < 1e-6)
+            {
+                return false;
+            }
+
+            const double invLen = 1.0 / std::sqrt(lenSq);
+            rearDir.X = (float)((double)rearDir.X * invLen);
+            rearDir.Y = (float)((double)rearDir.Y * invLen);
+
+            SDK::FVector rightDir;
+            rightDir.X = -rearDir.Y;
+            rightDir.Y = rearDir.X;
+            rightDir.Z = 0.0f;
+
+            // Lateral scan order: center -> outward.
+            int lateralOrder[5] = { 0, -1, 1, -2, 2 };
+
+            // Probe a 5x5 grid behind the base location relative to the player.
+            for (int rearStep = 1; rearStep <= gridSize; ++rearStep)
+            {
+                for (int li = 0; li < gridSize; ++li)
+                {
+                    const int latStep = (gridSize == 5) ? lateralOrder[li] : (li - half);
+
+                    SDK::FVector candidate = currentBase;
+                    candidate.X += rearDir.X * (cell * (float)rearStep) + rightDir.X * (cell * (float)latStep);
+                    candidate.Y += rearDir.Y * (cell * (float)rearStep) + rightDir.Y * (cell * (float)latStep);
+                    candidate.Z = playerLoc.Z;
+
+                    if (IsInEscapeDirectionSafe(playerLoc, candidate))
+                    {
+                        continue;
+                    }
+
+                    if (!TryProjectToGround(world, playerPawn, candidate))
+                    {
+                        continue;
+                    }
+
+                    if (IsLocationInPlayerLineOfSight(world, candidate))
+                    {
+                        continue;
+                    }
+
+                    if (DoesLocationHaveLineOfSightToPlayer(world, candidate))
+                    {
+                        continue;
+                    }
+
+                    outLocation = candidate;
+                    return true;
+                }
+            }
+
+            // No point worked: pick the furthest rear corner (left/right) and re-center, up to 10 times.
+            const bool chooseRight = (coin(gen) == 1);
+            const float rearDist = cell * (float)gridSize;
+            const float latDist = cell * (float)half * (chooseRight ? 1.0f : -1.0f);
+
+            SDK::FVector corner = currentBase;
+            corner.X += rearDir.X * rearDist + rightDir.X * latDist;
+            corner.Y += rearDir.Y * rearDist + rightDir.Y * latDist;
+            corner.Z = playerLoc.Z;
+
+            // Best-effort ground projection so subsequent repeats use reasonable Z.
+            (void)TryProjectToGround(world, playerPawn, corner);
+            currentBase = corner;
+
+            // If the chosen corner itself already blocks LoS, accept it immediately.
+            if (!IsInEscapeDirectionSafe(playerLoc, currentBase) &&
+                !IsLocationInPlayerLineOfSight(world, currentBase) &&
+                !DoesLocationHaveLineOfSightToPlayer(world, currentBase))
+            {
+                outLocation = currentBase;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     ArenaSubsystem* ArenaSubsystem::Get()
@@ -503,7 +715,7 @@ namespace Mod::Arena
                     SDK::AActor* actor = activeEnemies_[i];
                     if (!actor) continue;
 
-                    SDK::FVector finalLoc = playerLoc;
+                    SDK::FVector finalLoc = actor->K2_GetActorLocation();
                     bool foundNonVisible = false;
 
                     // Try a few offsets to avoid popping into the player's view at wave start.
@@ -545,17 +757,27 @@ namespace Mod::Arena
                             continue;
                         }
 
+                        SDK::FVector adjusted = candidate;
+                        if (!TryFindPlacementWhereNpcCannotSeePlayer(world, player, playerLoc, candidate, adjusted))
+                        {
+                            continue;
+                        }
+
+                        candidate = adjusted;
+
                         finalLoc = candidate;
                         foundNonVisible = true;
                         break;
                     }
 
-                    const SDK::FRotator lookRot = SDK::UKismetMathLibrary::FindLookAtRotation(finalLoc, playerLoc);
-                    actor->K2_SetActorLocationAndRotation(finalLoc, lookRot, false, nullptr, true);
-
                     if (!foundNonVisible)
                     {
-                        LOG_WARN("[Arena] Wave-start reposition: could not find non-visible spot for pre-spawned NPC " << actor->GetName() << "; used best-effort location");
+                        LOG_WARN("[Arena] Wave-start reposition: could not find LoS-safe spot for pre-spawned NPC " << actor->GetName() << "; leaving at pre-spawn location");
+                    }
+                    else
+                    {
+                        const SDK::FRotator lookRot = SDK::UKismetMathLibrary::FindLookAtRotation(finalLoc, playerLoc);
+                        actor->K2_SetActorLocationAndRotation(finalLoc, lookRot, false, nullptr, true);
                     }
                     
                     // Ensure they are in combat state
@@ -681,6 +903,15 @@ namespace Mod::Arena
             {
                 // Try again: push further out or around to the side rather than spawning in front of the player.
                 continue;
+            }
+
+            {
+                SDK::FVector adjusted = targetLoc;
+                if (!TryFindPlacementWhereNpcCannotSeePlayer(world, playerPawn, playerLoc, targetLoc, adjusted))
+                {
+                    continue;
+                }
+                targetLoc = adjusted;
             }
 
             SDK::FTransform transform = SDK::UKismetMathLibrary::MakeTransform(targetLoc, SDK::UKismetMathLibrary::FindLookAtRotation(targetLoc, playerLoc), {1, 1, 1});
@@ -1050,6 +1281,15 @@ namespace Mod::Arena
                     if (IsLocationInPlayerLineOfSight(world, candidate))
                     {
                         continue;
+                    }
+
+                    {
+                        SDK::FVector adjusted = candidate;
+                        if (!TryFindPlacementWhereNpcCannotSeePlayer(world, player, playerLoc, candidate, adjusted))
+                        {
+                            continue;
+                        }
+                        candidate = adjusted;
                     }
 
                     newPos = candidate;

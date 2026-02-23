@@ -1,0 +1,6 @@
+/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicScout.BP_RadiusNPCCharacterMimicScout_C
+/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicPoliceman.BP_RadiusNPCCharacterMimicPoliceman_C
+/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicJaeger.BP_RadiusNPCCharacterMimicJaeger_C
+/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicAssault.BP_RadiusNPCCharacterMimicAssault_C
+/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicMarksman.BP_RadiusNPCCharacterMimicMarksman_C
+/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicHeavy.BP_RadiusNPCCharacterMimicHeavy_C

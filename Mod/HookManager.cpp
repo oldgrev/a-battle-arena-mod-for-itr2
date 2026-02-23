@@ -1382,7 +1382,7 @@ namespace Mod
         namedHooks_["ChangeDurability"] = &Hook_DurabilityNoOp;
 
         // Arena behavior
-        namedHooks_["RequestAttackRole"] = &Hook_RequestAttackRole;
+        //namedHooks_["RequestAttackRole"] = &Hook_RequestAttackRole;
 
         // Player statsx
         namedHooks_["ChangeHungerAndNotifyAll"] = &Hook_ChangeHunger;

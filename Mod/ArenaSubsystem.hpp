@@ -38,15 +38,15 @@ namespace Mod::Arena
 
         const std::vector<std::string>& GetDiscoveredNPCs() const { return discoveredNPCs_; }
 
+        // "Escape direction" is captured once at wave start from the player's view (flattened to XY).
+        // Any spawn/teleport/reposition candidates in that hemisphere are rejected.
+        bool IsInEscapeDirection(const SDK::FVector& playerLoc, const SDK::FVector& location) const;
+
     private:
         void StartWave(SDK::UWorld* world);
         void SpawnOneNPC(SDK::UWorld* world, bool farAway = false);
         void CheckWaveCompletion(SDK::UWorld* world);
         void ResetWaveStats();
-
-        // "Escape direction" is captured once at wave start from the player's view (flattened to XY).
-        // Any spawn/teleport/reposition candidates in that hemisphere are rejected.
-        bool IsInEscapeDirection(const SDK::FVector& playerLoc, const SDK::FVector& location) const;
 
         void LoadNPCList();
         void SaveNPCList();

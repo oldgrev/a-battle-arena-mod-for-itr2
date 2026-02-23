@@ -12,7 +12,7 @@ namespace Mod::Tuning
     // ---------------------------------------------------------------------
     // Arena
     // ---------------------------------------------------------------------
-    inline constexpr int   kArenaDefaultWaveSize = 40;
+    inline constexpr int   kArenaDefaultWaveSize = 100;
     inline constexpr float kArenaDefaultSpawnDistance = 10000.0f;
     inline constexpr float kArenaMinSpawnDistance = 8000.0f;
 
@@ -27,8 +27,8 @@ namespace Mod::Tuning
     inline constexpr float kArenaMinPreSpawnInterval = 0.05f; // 50ms
 
     inline constexpr float kArenaSpawnTickIntervalSeconds = 0.5f;
-    inline constexpr float kArenaScanIntervalSeconds = 30.0f;
-    inline constexpr float kArenaMoveToPlayerIntervalSeconds = 30.0f;
+    inline constexpr float kArenaScanIntervalSeconds = 10.0f;
+    inline constexpr float kArenaMoveToPlayerIntervalSeconds = 10.0f;
 
     inline constexpr float kArenaProximityNoticeStartSeconds = 30.0f;
     inline constexpr float kArenaProximityNoticeIntervalSeconds = 5.0f;
@@ -58,6 +58,15 @@ namespace Mod::Tuning
     // LoS avoidance tuning (spawn/teleport)
     inline constexpr float kArenaLoSVisibilityTraceEndZOffset = 80.0f;
     inline constexpr float kArenaLoSVisibilityHitNearEndDistance = 120.0f;
+
+    // Extra safety rule: NPCs should not be placed where they have line-of-sight to the player.
+    // When enabled, placement will probe a 5x5 grid *behind the candidate location relative to the player*
+    // (500x500 cells) and, if needed, re-center on a rear corner up to 10 times.
+    inline constexpr bool  kArenaAvoidNpcSeeingPlayer = true;
+    inline constexpr int   kArenaNoSeePlayerGridSize = 5;           // 5x5
+    inline constexpr float kArenaNoSeePlayerGridCellSize = 500.0f;  // 500 units per cell
+    inline constexpr int   kArenaNoSeePlayerMaxRepeats = 10;
+    inline constexpr float kArenaNoSeePlayerTraceStartZOffset = 80.0f;
 
     // cos(60deg) = 0.5 -> 120deg full cone
     inline constexpr double kArenaLoSHalfConeCos = 0.5;

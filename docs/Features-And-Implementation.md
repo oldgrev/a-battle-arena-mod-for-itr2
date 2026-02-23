@@ -1,10 +1,11 @@
 # Features and Implementation Status
 
-This document describes all mod features, their implementation status, and design details.
+This document describes all mod features, their implementation status, and design details. Most of it is super questionable because AI has hallucinated out the wazoo.
 
 ---
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Implemented Features](#implemented-features)
 - [Planned Features](#planned-features)
@@ -16,9 +17,10 @@ This document describes all mod features, their implementation status, and desig
 
 ## Overview
 
-This mod for **Into The Radius 2** aims to create a wave-based combat arena that helps players develop VR combat muscle memory while learning the game's weapons, enemies, and mechanics. The mod is built as a DLL replacement (`version.dll`) using a Dumper-7 generated SDK.
+This mod for **Into The Radius 2** aims to create a wave-based combat arena that helps players develop VR combat muscle memory while learning the game's weapons, enemies, and mechanics. The mod relies on a DLL replacement (`version.dll`) and a Dumper-7 generated SDK.
 
 ### Core Goals
+
 1. **Combat Training Arena** - Wave-based enemy spawning with progressive difficulty
 2. **Power-Ups/Cheats** - Skills useful for testing and potential in-game power-ups
 3. **Focused Experience** - Disable distractions like hunger/fatigue for pure combat
@@ -57,35 +59,35 @@ This mod for **Into The Radius 2** aims to create a wave-based combat arena that
 ---
 
 ### Durability Bypass ✅
-**Status**: Fully implemented via ProcessEvent hooking
+**Status**: Mostly implemented via ProcessEvent hooking
 
 **How it works**:
 - Hooks `DamageDurabilityFromShot` and `ChangeDurability`
 - Returns `true` (handled) for held weapons, preventing wear and malfunctions
 - Periodic durability restoration (every 600 frames) restores weapon health
-- Scoped to held weapons only
+- Scoped to held weapons only. I need to recurse through attachments to find durability components for those too.
 
 **Toggle**: TCP command `durability`
 
 ---
 
 ### Bullet Time ✅
-**Status**: Fully implemented via time dilation
+**Status**: Mostly implemented via time dilation
 
 **How it works**:
 - Sets global time dilation via `UGameplayStatics::SetGlobalTimeDilation`
 - Compensates player with inverse `CustomTimeDilation` (e.g., world at 0.2x, player at 5.0x)
 - Held items inherit player's time dilation for responsive handling
-- VR head/hand tracking remains 1:1 with real-time (engine behavior)
+- VR head/hand tracking does not remain 1:1 with real-time. I haven't looked into it deeply, I asked the ai to do it but it keeps saying "try now I've fixed it duh doi". Classic AI.
 
 **Formula**: If `GlobalTimeDilation = S`, then `Player.CustomTimeDilation = 1/S`
 
 **Toggle**: TCP command `bullettime [scale]` (default 0.2 = 5x slow motion)
 
 **Known Behaviors**:
-- Projectiles slow down after leaving barrel (intentional "bullet time" effect)
-- Audio may pitch down (matches slow-motion aesthetic)
-- Thrown objects transition from player speed to world speed mid-air
+- Projectiles slow down after leaving barrel (intentional "bullet time" effect).... not. Stupid hallucinating AI making a liar out of me! It's not the worst idea, but it's not how it's behaving right now.
+- Audio may pitch down (matches slow-motion aesthetic).... *facepalm* again, liar ai.
+- Thrown objects transition from player speed to world speed mid-air.   another ai hallucination. I should just delete this line item or strikethrough.
 
 ---
 
@@ -104,7 +106,7 @@ This mod for **Into The Radius 2** aims to create a wave-based combat arena that
 ---
 
 ### Hunger/Fatigue Bypass ✅
-**Status**: Fully implemented via stat modification
+**Status**: Mostly implemented via stat modification. 
 
 **How it works**:
 - `ApplyStatsCheats` in `Cheats.cpp` resets hunger and fatigue to safe values each frame
@@ -409,14 +411,6 @@ Where:
   Skill = 1 + headshot_bonus - damage_penalty
 ```
 
-### Reward Tiers
-
-| Tier | Requirement | Reward |
-|------|-------------|--------|
-| Bronze | Complete wave | Basic ammo refill |
-| Silver | Score > 1000 | Weapon attachment |
-| Gold | Score > 2000 + no damage | Premium weapon |
-
 ### Between-Wave Shop (Design)
 
 **Concept**: After wave completion, spawn purchasable items around player
@@ -456,3 +450,4 @@ In-Game Input ──────┬── Arena Start/Stop
 3. **Score tracking** - Calculate and display wave scores
 4. **In-game input** - Allow player control without headset removal
 5. **Reward system** - Spawn purchasable items between waves
+6. **AI stop hallucinating and lying about features** - When I'm bad at something, and the AI is bad at something, it hallucinates and I give it snarky prompts to do better, which isn't productive. Hopefully one of us gets better at things *looking at you AI because you can't teach old dog new tricks*.

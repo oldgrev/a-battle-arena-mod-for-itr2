@@ -24,6 +24,20 @@ This mod for **Into The Radius 2** aims to create a wave-based combat arena that
 3. **Focused Experience** - Disable distractions like hunger/fatigue for pure combat
 4. **Progression System** - Scoring, rewards, and item purchasing between rounds
 5. **Player Feedback** - Visual information and interactivity within VR
+6. **Modes** - Different Arena Wave modes
+  a. Endless Survival - Infinite waves with increasing difficulty and no breaks until player fails. Every kill grants health/ammo/items.
+  b. Sniper hunted - Sniper Spawns and hunts the player. Every minute another sniper spawns. Maybe it's dark, maybe the player needs to hunt a mcguffin.
+  c. Glass Cannon - Player can only take one hit before failing the wave, but has a fully auto loadout and only 10 enemies in the wave.
+  d. Reload training - Lots of enemies, manual reload, but no need to fill the magazines yourself.
+  e. One shot one kill - Player has a mosin and only 10 bullets. Every enemy kill gives you one more bullet. Waves vary between close range enemies and long range snipers.
+  f. the legend of teabagger vance - Enemies don't fully die until you teabag them. I don't know, I'm immature, but at least it's a different concept.
+  g. Constant spawn - Every 5 seconds, a new enemy spawns until the player fails.
+  h. Lizard hunt - gimmic mode, there's a lizard in the world somewhere. It comes out every so often, peforms some feat bizarre feat of masochism and skill, and then has to go back to it's day job. The player has to find it and kill it before it goes back to work. Maybe it's noisy(itr1 mimic scream? itr1 slider sound?), and will path to a position within 100m of the player and then run off. Maybe it can be tempted out with bait.
+  i. Bosses? - buffed up versions of existing enemies, sometimes with escorts.
+  j. Assasins - You have to kill a high value target on the map.  They have low perception and hearing, and there's no squadsight, but if they do see you they have aimbot vision and will call in reinforcements.
+  h. Custom - Player can configure wave parameters like enemy type, count, spawn distance, and modifiers for a personalized challenge.
+7. **Custom Levels** - Potential for custom arena maps or modifications to existing levels for better combat flow
+8. **No, not everything here is being implemented.** - It's all subject to time, feasibility and interest. It's also a moving target for a game that's still in early access.
 
 ---
 

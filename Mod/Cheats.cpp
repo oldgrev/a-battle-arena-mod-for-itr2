@@ -14,6 +14,7 @@ SetUnlimitedAmmo/SetGodMode/etc.
 #include "ModFeedback.hpp"
 
 #include <sstream>
+#include <cmath>
 
 #include "Logging.hpp"
 #include "ArenaSubsystem.hpp"
@@ -342,6 +343,30 @@ namespace Mod
         return debugModeActive_;
     }
 
+    void Cheats::SetPortableLightIntensityScale(float scale)
+    {
+        if (!std::isfinite(scale))
+            scale = 1.0f;
+
+        // Keep sane bounds; values outside this range tend to blow out HDR or go fully dark.
+        if (scale < 0.05f) scale = 0.05f;
+        if (scale > 20.0f) scale = 20.0f;
+
+        portableLightIntensityScale_.store(scale, std::memory_order_relaxed);
+        portableLightScaleDirty_.store(true, std::memory_order_release);
+
+        std::wstringstream msg;
+        msg << L"[Mod] Light brightness scale: " << scale;
+        Mod::ModFeedback::ShowMessage(msg.str().c_str(), 3.0f, SDK::FLinearColor{0.9f, 0.9f, 0.2f, 1.0f});
+
+        LOG_INFO("[Cheats] Portable light intensity scale set to " << scale);
+    }
+
+    float Cheats::GetPortableLightIntensityScale() const
+    {
+        return portableLightIntensityScale_.load(std::memory_order_relaxed);
+    }
+
     std::string Cheats::GetStatus() const
     {
         std::ostringstream status;
@@ -370,8 +395,98 @@ namespace Mod
         if (noClipActive_) ToggleNoClip();
         if (jumpAllowedActive_) ToggleJumpAllowed();
         if (debugModeActive_) ToggleDebugMode();
+
+        // Clear any cached light pointers/intensities on level change.
+        portableLightOriginalIntensity_.clear();
+        portableLightScaleDirty_.store(true, std::memory_order_release);
+        nextPortableLightScan_ = std::chrono::steady_clock::time_point{};
         
         LOG_INFO("[Cheats] All cheats deactivated");
+    }
+
+    void Cheats::ApplyPortableLightBrightness(SDK::UWorld* world, SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player)
+    {
+        (void)player;
+
+        if (!world)
+            return;
+
+        const float scale = portableLightIntensityScale_.load(std::memory_order_relaxed);
+        if (!std::isfinite(scale) || scale <= 0.0f)
+            return;
+
+        // Default scale: do nothing unless we've previously scaled lights (or need to resync after a level change).
+        const bool isDefault = std::fabs(scale - 1.0f) < 0.0001f;
+        const bool dirty = portableLightScaleDirty_.load(std::memory_order_acquire);
+        if (isDefault && !dirty)
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!dirty && nextPortableLightScan_ != std::chrono::steady_clock::time_point{} && now < nextPortableLightScan_)
+            return;
+
+        // Even when scaled, scan infrequently to catch newly spawned/attached lights.
+        nextPortableLightScan_ = now + std::chrono::seconds(2);
+        portableLightScaleDirty_.store(false, std::memory_order_release);
+
+        if (!SDK::UObject::GObjects)
+            return;
+
+        const int32_t total = SDK::UObject::GObjects->Num();
+        if (total <= 0)
+            return;
+
+        int touched = 0;
+
+        auto applyTo = [&](SDK::ULocalLightComponent* light)
+        {
+            if (!light)
+                return;
+
+            auto* base = static_cast<SDK::ULightComponentBase*>(light);
+            auto it = portableLightOriginalIntensity_.find(base);
+            if (it == portableLightOriginalIntensity_.end())
+            {
+                it = portableLightOriginalIntensity_.emplace(base, base->Intensity).first;
+            }
+
+            const float target = it->second * scale;
+            if (std::fabs(base->Intensity - target) > 0.01f)
+            {
+                light->SetIntensity(target);
+                touched++;
+            }
+        };
+
+        for (int32_t i = 0; i < total; ++i)
+        {
+            SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(i);
+            if (!obj)
+                continue;
+
+            if (!obj->IsA(SDK::UBPC_LightComp_C::StaticClass()))
+                continue;
+
+            auto* lightComp = static_cast<SDK::UBPC_LightComp_C*>(obj);
+            if (!lightComp || lightComp->IsDefaultObject())
+                continue;
+
+            // Avoid messing with laser components; users typically only want flashlight/headlamp brightness.
+            if (lightComp->IsLaser)
+                continue;
+
+            applyTo(lightComp->SpotLight);
+            applyTo(lightComp->PointLight);
+        }
+
+        if (debugModeActive_.load() && touched > 0)
+        {
+            // Rate-limit in case the scan finds many objects.
+            if (portableLightLogCounter_++ < 10)
+            {
+                LOG_INFO("[Cheats] Applied portable light brightness scale=" << scale << " (touched=" << touched << ")");
+            }
+        }
     }
 
     void Cheats::Update(SDK::UWorld *world)
@@ -420,6 +535,9 @@ namespace Mod
                 }
             }
         }
+
+        // Flashlight/headlamp brightness scaling (runs infrequently; safe even if player is null)
+        ApplyPortableLightBrightness(world, player);
     }
 
     void Cheats::UpdateHeldItemsDilation(SDK::UWorld *world, float targetDilation, SDK::ABP_RadiusPlayerCharacter_Gameplay_C *player)

@@ -1026,6 +1026,14 @@ namespace Mod::Loadout
                 SDK::ARadiusItemBase* item = playerItems[i];
                 if (item)
                 {
+                    // first check to make sure it item isn't the tablet
+                    //if (parentContainerUid.find("Tablet") != std::string::npos)
+                    if (item->Class && item->Class->GetName().find("Tablet") != std::string::npos)
+                    {
+                        LOG_INFO("[Loadout] Skipping Tablet slot");
+                        continue;
+                    }
+
                     try
                     {
                         // Destroy the actor

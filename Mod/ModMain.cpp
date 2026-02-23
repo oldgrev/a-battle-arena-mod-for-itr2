@@ -31,6 +31,8 @@
 //
 
 
+// There's so much unnecessary stuff I'd be hooking or calling every loop in this thing right now...I'll fix it later ;)
+
 
 #include "ModMain.hpp"
 

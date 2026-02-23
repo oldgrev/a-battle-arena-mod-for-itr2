@@ -1012,7 +1012,7 @@ namespace Mod::Arena
         auto* coord = static_cast<SDK::URadiusAICoordinationSubsystem*>(SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass()));
         if (coord && coord->NPCConfig)
         {
-            coord->NPCConfig->MaxNPCNumCanAttackAtTime = limit;
+            coord->NPCConfig->MaxNPCNumCanAttackAtTime = limit; // not entirely sure this is working, i'll need some tracing and stuff later.
             LOG_INFO("[Arena] Set MaxNPCNumCanAttackAtTime to " << limit);
         }
     }

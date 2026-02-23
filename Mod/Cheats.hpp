@@ -2,6 +2,8 @@
 
 #include <string>
 #include <atomic>
+#include <unordered_map>
+#include <chrono>
 
 #include "..\CppSDK\SDK.hpp"
 
@@ -67,6 +69,11 @@ namespace Mod
         void ToggleDebugMode();
         bool IsDebugModeActive() const;
 
+        // Scale intensity of portable player lights (flashlight/headlamp/etc that use BPC_LightComp)
+        // 1.0 = default game brightness
+        void SetPortableLightIntensityScale(float scale);
+        float GetPortableLightIntensityScale() const;
+
         // Get cheat status as string
         std::string GetStatus() const;
 
@@ -116,5 +123,15 @@ namespace Mod
 
         // Ensure held items move at normal speed during bullet time
         void UpdateHeldItemsDilation(SDK::UWorld *world, float targetDilation, SDK::ABP_RadiusPlayerCharacter_Gameplay_C *player);
+
+        // Apply flashlight/headlamp brightness scaling
+        void ApplyPortableLightBrightness(SDK::UWorld* world, SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player);
+
+        // Track original light intensities so scaling is stable (no compounding each tick)
+        std::unordered_map<SDK::ULightComponentBase*, float> portableLightOriginalIntensity_;
+        std::chrono::steady_clock::time_point nextPortableLightScan_{};
+        std::atomic<float> portableLightIntensityScale_{1.0f};
+        std::atomic<bool> portableLightScaleDirty_{true};
+        uint32_t portableLightLogCounter_{0};
     };
 }

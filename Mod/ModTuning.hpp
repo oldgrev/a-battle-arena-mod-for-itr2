@@ -20,8 +20,8 @@ namespace Mod::Tuning
     // then reposition into the final ring at wave start.
     inline constexpr float kArenaPreSpawnExtraDistance = 8000.0f;
 
-    inline constexpr float kArenaWaveCooldownSeconds = 5.0f;
-    inline constexpr float kArenaNextWaveDelaySeconds = 5.0f;
+    inline constexpr float kArenaWaveCooldownSeconds = 15.0f;
+    inline constexpr float kArenaNextWaveDelaySeconds = 15.0f;
 
     // Pre-spawn interval guard: never spawn faster than this regardless of wave size.
     inline constexpr float kArenaMinPreSpawnInterval = 0.05f; // 50ms
@@ -52,7 +52,7 @@ namespace Mod::Tuning
     inline constexpr float kArenaStuckTeleportCooldownSeconds = 3.0f;
     inline constexpr float kArenaOverdueWaveSeconds = 120.0f;
     inline constexpr float kArenaTeleportMinDistanceFromPlayer = 1000.0f;
-    inline constexpr float kArenaTeleportDistanceFactor = 0.5f;
+    inline constexpr float kArenaTeleportDistanceFactor = 0.2f;
     inline constexpr float kArenaStuckMoveDistanceSq = 100.0f; // (10 units)^2
 
     // LoS avoidance tuning (spawn/teleport)

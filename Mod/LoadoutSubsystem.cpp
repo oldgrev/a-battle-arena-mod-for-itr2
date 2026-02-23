@@ -17,6 +17,9 @@ AILEARNINGS
 - Some inventory “container objects” returned by URadiusContainerSubsystem::GetContainerObject are UActorComponent holster components (no world transform); use GetOwner() to derive an anchor pose.
 - UClass::GetFunction(ClassName, FuncName) only finds functions for an exact declaring class name; for unknown Blueprint-generated container classes (e.g. BPC_AS_Base_Molle_Vertical_S10) scan the class chain’s Children fields by function name instead.
 - For holster/holder containers, prefer calling StartHolstering(ItemActor, RelativeTransform) with the captured local transform; URadiusContainerSubsystem::InstantHolsterActor can snap items to an unexpected transform (observed as warping modules across the map).
+- For holster/holder containers, prefer calling StartHolstering/PutItemToContainer with the captured local transform; URadiusContainerSubsystem::InstantHolsterActor can snap items to an unexpected transform (observed as warping modules across the map).
+- Weapon attachments often parent to `AttachSlot.*` containers; those container objects can be non-scene components where using owner-actor pose as a spawn anchor misplaces optics/lasers. For `AttachSlot.*` items, spawn near the player and rely on attach logic.
+- Magazine/stackable ammo is represented as `stacked=` counts in loadouts; set `FItemConfiguration.StackAmount` when spawning or magazines will spawn empty.
 */
 
 #include "LoadoutSubsystem.hpp"
@@ -1421,7 +1424,13 @@ namespace Mod::Loadout
         SDK::FItemConfiguration cfg{};
         cfg.bShopItem = false;
         cfg.StartDurabilityRatio = item.durability;
-        cfg.StackAmount = 1;
+        int stackAmount = 0;
+        for (const auto& kv : item.stackedItems)
+        {
+            if (kv.second > 0)
+                stackAmount += kv.second;
+        }
+        cfg.StackAmount = (stackAmount > 0) ? stackAmount : 1;
 
         try
         {
@@ -1462,7 +1471,9 @@ namespace Mod::Loadout
                                   SDK::AActor* actor,
                                   const std::string& label,
                                   const SDK::FTransform* desiredRelativeTransform,
-                                  SDK::UWorld* world)
+                                  SDK::UWorld* world,
+                                  bool preferPutFirst,
+                                  bool forbidInstantHolster)
     {
         if (!container || !actor)
         {
@@ -1481,6 +1492,23 @@ namespace Mod::Loadout
         {
             try
             {
+                // Some containers (notably AttachSlot.*) must NOT use InstantHolsterActor.
+                // Best-effort attach: PutItemToContainer + then apply captured relative transform.
+                if (preferPutFirst)
+                {
+                    LOG_INFO("[Loadout] AttachToContainer: preferPutFirst enabled for " << label << " (class=" << clsName << ")");
+                    bool ok = false;
+                    try { ok = cs->PutItemToContainer(container, actor); } catch (...) { ok = false; }
+                    if (ok)
+                    {
+                        SDK::FHitResult hit{};
+                        actor->K2_SetActorRelativeTransform(*desiredRelativeTransform, false, &hit, true);
+                        LOG_INFO("[Loadout] Attached via PutItemToContainer + SetRelativeTransform: " << label);
+                        return true;
+                    }
+                    LOG_WARN("[Loadout] preferPutFirst: PutItemToContainer returned false for " << label);
+                }
+
                 // Molle slots: InstantHolsterActor is the warp source; prefer PutItemToContainer first.
                 if (clsLower.find("molle") != std::string::npos)
                 {
@@ -1535,6 +1563,28 @@ namespace Mod::Loadout
             {
                 LOG_WARN("[Loadout] StartHolstering ProcessEvent threw for " << label);
             }
+        }
+
+        if (forbidInstantHolster)
+        {
+            // Critical safety: for some attachment-slot containers InstantHolsterActor teleports the item
+            // to a different holster/container far away, causing extreme FPS drops.
+            LOG_ERROR("[Loadout] AttachToContainer: forbidInstantHolster active; skipping InstantHolsterActor for " << label << " (class=" << clsName << ")");
+            try
+            {
+                bool ok = cs->PutItemToContainer(container, actor);
+                if (ok)
+                {
+                    LOG_INFO("[Loadout] Attached via PutItemToContainer (forbidInstantHolster): " << label);
+                }
+                else
+                {
+                    LOG_WARN("[Loadout] PutItemToContainer returned false (forbidInstantHolster): " << label);
+                }
+                return ok;
+            }
+            catch (...) {}
+            return false;
         }
 
         try
@@ -1705,7 +1755,8 @@ namespace Mod::Loadout
                 SDK::FVector(item.transform.scaleX, item.transform.scaleY, item.transform.scaleZ)
             );
 
-            AttachToContainer(containerSubsystem, parentContainer, actor, item.itemTypeTag, &relTransform, world);
+            AttachToContainer(containerSubsystem, parentContainer, actor, item.itemTypeTag, &relTransform, world,
+                              false, false);
             // apply relative transform after attachment
             if (parentContainer && actor)
             {
@@ -1824,6 +1875,7 @@ namespace Mod::Loadout
             {
                 // Parse the parent UID
                 auto [baseUid, slotSuffix] = ParseParentUid(item.parentContainerUid);
+                const bool isAttachSlot = (!slotSuffix.empty() && slotSuffix.find("AttachSlot") != std::string::npos);
 
                 SDK::UObject* parentContainer = nullptr;
                 bool parentResolved = false;
@@ -1907,7 +1959,15 @@ namespace Mod::Loadout
                 std::set<std::string> snapBefore = SnapshotInventory(cs);
 
                 // --- Spawn the item ---
-                SDK::AActor* actor = SpawnItem(world, item, parentContainer);
+                SDK::UObject* spawnNear = parentContainer;
+                if (isAttachSlot)
+                {
+                    // Attachment slots: the container object may not have a meaningful world pose.
+                    // Spawn near player and let the attach call place it.
+                    spawnNear = nullptr;
+                }
+
+                SDK::AActor* actor = SpawnItem(world, item, spawnNear);
                 if (!actor)
                 {
                     LOG_ERROR("[Loadout] Spawn failed: " << item.itemTypeTag);
@@ -1957,9 +2017,9 @@ namespace Mod::Loadout
                     //     catch (...) { LOG_WARN("[Loadout]   Could not read post-attach worldPos"); }
                     // }
 
-                    // that trash is all wrong, objects need to be moved to the correct position BEFORE being attached, so get the parentContainer's world position, work out what the local transform of the object does to that, and then combine them and set the world location of the object to that, AND THEN ATTACH
-                    // first get the parentContainer world cooords
-                    if (parentContainer)
+                    // Pre-positioning helps some container attach paths that rely on current world pose,
+                    // but it's actively harmful for AttachSlot.* containers.
+                    if (parentContainer && !isAttachSlot)
                     {
                         SDK::FVector parentWorldLoc;
                         SDK::FRotator parentWorldRot;
@@ -2001,16 +2061,23 @@ namespace Mod::Loadout
                             LOG_WARN("[Loadout] Could not get parent container world pose");
                         }
 
-                        const SDK::FTransform* attachRel = nullptr;
-                        if (!baseUid.empty())
-                        {
-                            // Only item-slot attachments should use the explicit relative-transform holster path.
-                            // Player body-slot holsters are left on the subsystem InstantHolsterActor path.
-                            attachRel = &relTransform;
-                        }
-                        AttachToContainer(cs, parentContainer, actor, item.itemTypeTag, attachRel, world);
-
                     }
+
+                    const SDK::FTransform* attachRel = nullptr;
+                    if (!baseUid.empty())
+                    {
+                        // Only item-slot attachments should use the explicit relative-transform holster path.
+                        // Player body-slot holsters are left on the subsystem InstantHolsterActor path.
+                        attachRel = &relTransform;
+                    }
+
+                    // AttachSlot.* containers are not holsters; InstantHolsterActor on the subsystem can
+                    // attach them to the wrong place (huge offsets). Force PutItemToContainer-only.
+                    const bool preferPutFirst = isAttachSlot;
+                    const bool forbidInstantHolster = isAttachSlot;
+
+                    AttachToContainer(cs, parentContainer, actor, item.itemTypeTag, attachRel, world,
+                                      preferPutFirst, forbidInstantHolster);
 
 
 

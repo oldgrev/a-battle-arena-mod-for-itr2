@@ -11,6 +11,7 @@
 #include "ArenaSubsystem.hpp"
 #include "ItemSubsystem.hpp"
 #include "LoadoutSubsystem.hpp"
+#include "FriendSubsystem.hpp"
 #include "Cheats.hpp"
 
 namespace Mod

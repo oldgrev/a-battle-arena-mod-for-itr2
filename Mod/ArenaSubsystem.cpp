@@ -41,6 +41,7 @@ AILEARNINGS
 #include "GameContext.hpp"
 #include "ModTuning.hpp"
 #include "LoadoutSubsystem.hpp"
+#include "FriendSubsystem.hpp"
 
 #include <sstream>
 #include <random>
@@ -49,6 +50,7 @@ AILEARNINGS
 #include <filesystem>
 #include <cmath>
 #include <unordered_set>
+#include <cstdint>
 
 namespace Mod::Arena
 {
@@ -103,6 +105,48 @@ namespace Mod::Arena
         flat.Pitch = 0.0f;
         flat.Roll = 0.0f;
         return SDK::UKismetMathLibrary::GetForwardVector(flat);
+    }
+
+    static double LenSq2D(const SDK::FVector& v)
+    {
+        return (double)v.X * (double)v.X + (double)v.Y * (double)v.Y;
+    }
+
+    static SDK::FVector Normalize2D(const SDK::FVector& v, const SDK::FVector& fallback)
+    {
+        const double lsq = LenSq2D(v);
+        if (lsq < 1e-9)
+        {
+            return fallback;
+        }
+        const double inv = 1.0 / std::sqrt(lsq);
+        SDK::FVector out = v;
+        out.X = (float)((double)out.X * inv);
+        out.Y = (float)((double)out.Y * inv);
+        out.Z = 0.0f;
+        return out;
+    }
+
+    static SDK::FVector RightFromForward2D(const SDK::FVector& forward)
+    {
+        SDK::FVector right{};
+        right.X = -forward.Y;
+        right.Y = forward.X;
+        right.Z = 0.0f;
+        return right;
+    }
+
+    static float Hash01_FromPtr(const void* p)
+    {
+        // Stable-ish within a run: good enough to spread actors across angles without storing extra state.
+        std::uintptr_t x = reinterpret_cast<std::uintptr_t>(p);
+        x ^= (x >> 33);
+        x *= 0xff51afd7ed558ccdULL;
+        x ^= (x >> 33);
+        x *= 0xc4ceb9fe1a85ec53ULL;
+        x ^= (x >> 33);
+        const std::uint32_t lo = (std::uint32_t)(x & 0xffffffffu);
+        return (float)((double)lo / (double)0xffffffffu);
     }
 
     // Returns true if the location is likely visible in the player's current line-of-sight.
@@ -408,18 +452,22 @@ namespace Mod::Arena
     static bool Hook_OnDeath(SDK::UObject* object, SDK::UFunction* function, void* parms, Mod::HookManager::ProcessEventFn originalFn)
     {
         (void)function;
-        if (g_Arena && g_Arena->IsActive() && parms && object && object->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
+        if (parms && object && object->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
         {
             Mod::ScopedProcessEventGuard guard;
             auto* params = static_cast<RadiusAICharacterBase_OnDeath*>(parms);
-            if (params->DiedPawn)
+            SDK::AActor* diedActor = params->DiedPawn
+                ? const_cast<SDK::AActor*>(params->DiedPawn)
+                : static_cast<SDK::AActor*>(object);
+
+            // Notify arena subsystem.
+            if (g_Arena && g_Arena->IsActive())
             {
-                g_Arena->OnNPCDeath(const_cast<SDK::AActor*>(params->DiedPawn));
+                g_Arena->OnNPCDeath(diedActor);
             }
-            else
-            {
-                g_Arena->OnNPCDeath(static_cast<SDK::AActor*>(object));
-            }
+
+            // Always notify friend subsystem (it ignores actors it doesn't track).
+            Mod::Friend::FriendSubsystem::Get()->OnActorDeath(diedActor);
         }
         return false;
     }
@@ -803,6 +851,7 @@ namespace Mod::Arena
         waveStartTime_ = time;
         lastProximityNoticeTime_ = 0.0f;
         lastSpawnTime_ = 0.0f;
+        lastMoveToPlayerTime_ = time;
         lastScanTime_ = time; // Align scan timer with the immediate scan above
 
         LOG_INFO("[Arena] StartWave: setting attack limit");
@@ -1381,19 +1430,149 @@ namespace Mod::Arena
         if (!player) return;
 
         Mod::ScopedProcessEventGuard guard;
+
         SDK::FVector playerLoc = player->K2_GetActorLocation();
+        SDK::FVector viewLoc{};
+        SDK::FRotator viewRot{};
+        (void)Mod::GameContext::GetPlayerView(world, viewLoc, viewRot);
+
+        // Use the wave-start escape forward if available (to preserve the "no enemies in escape direction" rule).
+        SDK::FVector forward = hasWaveEscapeForward_ ? waveEscapeForward_ : FlattenRotation(viewRot);
+        forward.Z = 0.0f;
+        forward = Normalize2D(forward, SDK::FVector{1.0f, 0.0f, 0.0f});
+        const SDK::FVector right = RightFromForward2D(forward);
+
+        enum class PressureMode : int
+        {
+            DirectToPlayer = 0,
+            PincerFlank = 1,
+            EncircleBehindRing = 2,
+            LeapfrogAdvance = 3,
+        };
+
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> pickMode(0, 3);
+        const PressureMode mode = static_cast<PressureMode>(pickMode(gen));
+
+        const char* modeName = "Direct";
+        switch (mode)
+        {
+        case PressureMode::DirectToPlayer: modeName = "Direct"; break;
+        case PressureMode::PincerFlank: modeName = "PincerFlank"; break;
+        case PressureMode::EncircleBehindRing: modeName = "EncircleRing"; break;
+        case PressureMode::LeapfrogAdvance: modeName = "Leapfrog"; break;
+        }
+
+        std::uniform_real_distribution<float> jitter(-Mod::Tuning::kArenaPressureTargetJitterXY, Mod::Tuning::kArenaPressureTargetJitterXY);
 
         std::lock_guard<std::recursive_mutex> lock(activeEnemiesMutex_);
-        for (auto* actor : activeEnemies_)
+        for (size_t i = 0; i < activeEnemies_.size(); ++i)
         {
+            auto* actor = activeEnemies_[i];
             if (!actor || !actor->IsA(SDK::ARadiusAICharacterBase::StaticClass())) continue;
             auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(actor);
-            if (aiChar->AIController)
+
+            if (!aiChar->AIController)
             {
-                    aiChar->AIController->MoveToLocation(playerLoc, Mod::Tuning::kArenaMoveToPlayerAcceptanceRadius, true, true, true, true, nullptr, true);
+                continue;
             }
+
+            // Ensure they're in a combat-ready state before applying pressure movement.
+            aiChar->AIController->SetNPCState(SDK::ENPCState::Combat);
+
+            SDK::FVector target = playerLoc;
+            if (mode == PressureMode::DirectToPlayer)
+            {
+                // Old behavior: collapse on the player's current position.
+                target = playerLoc;
+            }
+            else if (mode == PressureMode::PincerFlank)
+            {
+                // Split attackers left/right and slightly behind the player's escape direction.
+                const float sideSign = (((i & 1ull) == 0ull) ? 1.0f : -1.0f);
+                target = playerLoc;
+                target.X -= forward.X * Mod::Tuning::kArenaPressureBehindPlayerDistance;
+                target.Y -= forward.Y * Mod::Tuning::kArenaPressureBehindPlayerDistance;
+                target.X += right.X * sideSign * Mod::Tuning::kArenaPressureFlankOffset;
+                target.Y += right.Y * sideSign * Mod::Tuning::kArenaPressureFlankOffset;
+            }
+            else if (mode == PressureMode::EncircleBehindRing)
+            {
+                // Assign each NPC a stable-ish angle on a *behind* semicircle, creating a surrounding pressure.
+                const float t = Hash01_FromPtr(actor);
+                const float phi = (t * 3.14159265f) - (3.14159265f * 0.5f); // [-pi/2, +pi/2]
+                const float c = std::cosf(phi);
+                const float s = std::sinf(phi);
+                target = playerLoc;
+                // Behind is -forward; lateral is right.
+                target.X += (-forward.X * c + right.X * s) * Mod::Tuning::kArenaPressureRingRadius;
+                target.Y += (-forward.Y * c + right.Y * s) * Mod::Tuning::kArenaPressureRingRadius;
+            }
+            else // PressureMode::LeapfrogAdvance
+            {
+                // Leapfrog: push each NPC toward an intermediate waypoint so they keep making progress
+                // even if direct paths cluster or get blocked.
+                SDK::FVector npcLoc = actor->K2_GetActorLocation();
+                SDK::FVector toPlayer;
+                toPlayer.X = playerLoc.X - npcLoc.X;
+                toPlayer.Y = playerLoc.Y - npcLoc.Y;
+                toPlayer.Z = 0.0f;
+
+                const double distSq = LenSq2D(toPlayer);
+                if (distSq < 1.0)
+                {
+                    target = playerLoc;
+                }
+                else
+                {
+                    const float dist = static_cast<float>(std::sqrt(distSq));
+                    SDK::FVector dir = toPlayer;
+                    const float inv = (dist > 0.0f) ? (1.0f / dist) : 0.0f;
+                    dir.X = dir.X * inv;
+                    dir.Y = dir.Y * inv;
+                    dir.Z = 0.0f;
+
+                    float step = (float)dist * Mod::Tuning::kArenaPressureLeapfrogFraction;
+                    if (step < Mod::Tuning::kArenaPressureLeapfrogMinStep) step = Mod::Tuning::kArenaPressureLeapfrogMinStep;
+                    if (step > Mod::Tuning::kArenaPressureLeapfrogMaxStep) step = Mod::Tuning::kArenaPressureLeapfrogMaxStep;
+
+                    // Small lateral offset so they don't all pick the same corridor.
+                    const float sideSign = (Hash01_FromPtr(aiChar) < 0.5f) ? 1.0f : -1.0f;
+                    target = npcLoc;
+                    target.X += dir.X * step + right.X * sideSign * (Mod::Tuning::kArenaPressureFlankOffset * 0.35f);
+                    target.Y += dir.Y * step + right.Y * sideSign * (Mod::Tuning::kArenaPressureFlankOffset * 0.35f);
+                }
+            }
+
+            // Add slight randomness so repeated ticks don't converge to exact same points.
+            target.X += jitter(gen);
+            target.Y += jitter(gen);
+
+            // Best-effort ground projection to avoid aiming for mid-air points.
+            (void)TryProjectToGround(world, player, target);
+
+            // Preserve the "don't send enemies into escape direction" rule if we can.
+            if (hasWaveEscapeForward_ && IsInEscapeDirection(playerLoc, target))
+            {
+                // Mirror to the other side of the player.
+                target.X = playerLoc.X - (target.X - playerLoc.X);
+                target.Y = playerLoc.Y - (target.Y - playerLoc.Y);
+                (void)TryProjectToGround(world, player, target);
+            }
+
+            aiChar->AIController->MoveToLocation(
+                target,
+                Mod::Tuning::kArenaMoveToPlayerAcceptanceRadius,
+                true,
+                true,
+                true,
+                true,
+                nullptr,
+                true);
         }
-        LOG_INFO("[Arena] Instructed all NPCs to move to player position");
+
+        LOG_INFO("[Arena] Pressure pathing: instructed all NPCs (mode=" << modeName << ")");
     }
 
     void ArenaSubsystem::OnNPCDeath(SDK::AActor* actor)
@@ -1459,8 +1638,16 @@ namespace Mod::Arena
         }
 
         LOG_INFO("[Arena] Wave clear! Stats — dmg=" << dmg << ", bullets=" << bullets << ", wave=" << wave_ << ", enemiesPerWave=" << enemiesPerWave_);
-        wchar_t msg[128]{};
-        _snwprintf_s(msg, _TRUNCATE, L"Wave Cleared! Next wave in %.0fs...", Mod::Tuning::kArenaNextWaveDelaySeconds);
+        wchar_t msg[256]{};
+        _snwprintf_s(
+            msg,
+            _TRUNCATE,
+            L"Wave Cleared!\nShots fired: %d\nDamage taken: %.0f\nNext wave in %.0fs...",
+            bullets,
+            dmg,
+            Mod::Tuning::kArenaNextWaveDelaySeconds);
+
+        // Keep the stats visible throughout the inter-wave delay so they don't get missed.
         Mod::ModFeedback::ShowMessage(msg, Mod::Tuning::kArenaNextWaveDelaySeconds, SDK::FLinearColor{0.4f, 1.0f, 0.4f, 1.0f});
         
         active_.store(false);

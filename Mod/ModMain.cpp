@@ -52,6 +52,7 @@
 #include "GameContext.hpp"
 #include "ModFeedback.hpp"
 #include "ModTuning.hpp"
+#include "FriendSubsystem.hpp"
 #include "..\CppSDK\SDK.hpp"
 
 
@@ -122,6 +123,9 @@ namespace Mod
 
         // Initialize loadout subsystem
         Loadout::LoadoutSubsystem::Get()->Initialize();
+
+        // Initialize sound system (scan sounds/ folder if present).
+        Mod::ModFeedback::InitSoundSystem();
 
         // Create command handler with all commands
         CommandHandlerRegistry commandHandler;
@@ -242,6 +246,9 @@ namespace Mod
             {
                 arena->Update(world);
             }
+
+            // Update Friend subsystem
+            Mod::Friend::FriendSubsystem::Get()->Update(world);
         }
     }
 }

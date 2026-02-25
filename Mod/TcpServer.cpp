@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "CommandQueue.hpp"
+#include "Logging.hpp"
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -47,7 +48,13 @@ namespace Mod
         bool IsAllowedChar(char ch)
         {
             unsigned char uch = static_cast<unsigned char>(ch);
-            return std::isalnum(uch) || ch == '_' || ch == '/' || ch == '.';
+            return std::isalnum(uch) || ch == '_' || ch == '/' || ch == '.'
+                   || ch == ':'  // needed for URL schemes
+                   || ch == '?'  // query markers
+                   || ch == '&' // parameter separators
+                    // allow backslashes!
+                   || ch == '\\'
+                   || ch == '-'; // allow dashes since they're common in sound group names and URLs
         }
 
         std::string SanitizeCommandLine(const std::string &value)
@@ -314,7 +321,9 @@ namespace Mod
                     std::string line = pending.substr(0, newlinePos + 1);
                     pending.erase(0, newlinePos + 1);
                     line = TrimLineEndings(std::move(line));
+                    LOG_INFO("[tcp] Received command: " << line);
                     line = SanitizeCommandLine(line);
+                    LOG_INFO("[tcp] Sanitized command: " << line);
                     if (!line.empty() && queue_)
                     {
                         queue_->Push(std::move(line));

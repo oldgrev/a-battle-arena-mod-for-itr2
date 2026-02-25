@@ -29,9 +29,6 @@
 //
 
 
-
-
-
 #include "HookManager.hpp"
 #include "Cheats.hpp"
 #include "ModMain.hpp"
@@ -636,33 +633,17 @@ namespace Mod
             {
                 return false;
             }
+            // if unlimited ammo is disabled follow normal flow
+            if (!HookManager::Get().IsUnlimitedAmmoEnabled())
+            {
+                // call original function to maintain normal behavior
+                originalFn(object, function, parms);
+                return true; // Indicate that we've handled the call
+            }
+
+
 
             auto *extractParams = reinterpret_cast<TryExtractNextItemParams *>(parms);
-            
-         /*   {
-                static int logCount = 0;
-                if (logCount < 10)
-                {
-                    logCount++;
-                    LOG_INFO("[HookManager][TryExtractNextItem] Called. extractParams=" << extractParams 
-                             << ", CurrentReturnValue=" << (int)extractParams->ReturnValue);
-                }
-            }*/
-            
-            // Only interfere when:
-            // - we are in a held-weapon context (prevents shop/world weapons being mutated)
-            // - we have a known ammo tag (prevents breaking fresh weapons when enabling cheat before first shot)
-            // if (!IsHeldContext(object))
-            // {
-            //     static int notHeldLogs = 0;
-            //     if (notHeldLogs < 10)
-            //     {
-            //         notHeldLogs++;
-            //         LOG_INFO("[HookManager][TryExtractNextItem] Skip (not held context)");
-            //     }
-            //     return false;
-            // }
-
             if (!gHasLastObservedAmmoTag)
             {
                 static int noTagLogs = 0;
@@ -690,6 +671,12 @@ namespace Mod
 
             auto *component = static_cast<SDK::URadiusFirearmComponent *>(object);
             auto *params = reinterpret_cast<ServerShootProjectileParams *>(parms);
+            // only apply cheat if unlimited ammo is enabled, otherwise follow normal flow
+            if (!HookManager::Get().IsUnlimitedAmmoEnabled())
+            {
+                originalFn(object, function, parms);
+                return true; // Indicate that we've handled the call
+            }
 
             // Only apply cheat to held weapons.
             SDK::AActor *owner = TryGetOwningActor(component);

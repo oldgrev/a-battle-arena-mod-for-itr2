@@ -16,6 +16,7 @@
 
 *.gch
 *.pch
+*.mp3
 
 *.idb
 *.pdb

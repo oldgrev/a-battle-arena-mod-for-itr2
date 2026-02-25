@@ -28,7 +28,7 @@ namespace Mod::Tuning
 
     inline constexpr float kArenaSpawnTickIntervalSeconds = 0.5f;
     inline constexpr float kArenaScanIntervalSeconds = 10.0f;
-    inline constexpr float kArenaMoveToPlayerIntervalSeconds = 10.0f;
+    inline constexpr float kArenaMoveToPlayerIntervalSeconds = 30.0f;
 
     inline constexpr float kArenaProximityNoticeStartSeconds = 30.0f;
     inline constexpr float kArenaProximityNoticeIntervalSeconds = 5.0f;
@@ -85,6 +85,15 @@ namespace Mod::Tuning
     inline constexpr float kArenaNpcSuspiciousActivityLevel = 1.0f;
     inline constexpr float kArenaMoveToPlayerAcceptanceRadius = 100.0f;
 
+    // Pressure pathing patterns (used by the periodic "pressure" instruction)
+    inline constexpr float kArenaPressureBehindPlayerDistance = 900.0f;
+    inline constexpr float kArenaPressureFlankOffset = 900.0f;
+    inline constexpr float kArenaPressureRingRadius = 1300.0f;
+    inline constexpr float kArenaPressureLeapfrogFraction = 0.55f;
+    inline constexpr float kArenaPressureLeapfrogMinStep = 700.0f;
+    inline constexpr float kArenaPressureLeapfrogMaxStep = 2500.0f;
+    inline constexpr float kArenaPressureTargetJitterXY = 200.0f;
+
     // ---------------------------------------------------------------------
     // Cheats
     // ---------------------------------------------------------------------
@@ -102,4 +111,45 @@ namespace Mod::Tuning
     inline constexpr float kAISpawnGroundTraceUp = 5000.0f;
     inline constexpr float kAISpawnGroundTraceDown = 5000.0f;
     inline constexpr float kAISpawnGroundZOffset = 120.0f;
+
+    // ---------------------------------------------------------------------
+    // Friend NPC
+    // ---------------------------------------------------------------------
+    inline constexpr int   kFriendMaxCount = 3;                   // max simultaneous friend NPCs
+    inline constexpr float kFriendFollowDistanceMax = 2000.0f;    // if friend is farther than this, move it
+    inline constexpr float kFriendFollowDistanceMin = 350.0f;     // target minimum distance from player
+    inline constexpr float kFriendFollowDistanceTarget = 600.0f;  // ideal distance from player when repositioning
+    inline constexpr float kFriendFollowAcceptanceRadius = 200.0f;
+    // throttle how often a friend will be told to move when he's too far away.  Without this,
+    // the NPC may receive movement commands every single tick while the player walks, which
+    // shows up as repeated log lines and extra AI churn.
+    inline constexpr float kFriendFollowCooldownBase     = 10.0f;  // seconds; jittered ±kFriendJitterFraction
+    inline constexpr float kFriendRepositionIntervalBase = 30.0f; // seconds; jittered ±50%
+    inline constexpr float kFriendAmbientSoundIntervalBase = 30.0f;
+    inline constexpr float kFriendEnemySpotCheckIntervalBase = 10.0f; // how often we check for enemies
+    inline constexpr float kFriendEnemySpotChance = 0.60f;        // 60% chance per check when enemy in range
+    inline constexpr float kFriendEnemySpotRangeUnits = 4000.0f;
+    inline constexpr int   kFriendGroupId = 200;                  // separate from arena enemies (101)
+    inline constexpr float kFriendJitterFraction = 0.50f;         // ±50% on all interval timers
+    inline constexpr float kFriendIdleResetIntervalSeconds = 10.0f; // how often we re-assert Idle state
+    inline constexpr float kFriendDeathCleanupDelaySeconds = 3.0f;  // wait for tragedy sound before cleanup
+
+    // Extra friend movement tuning
+    inline constexpr float kFriendStuckTeleportFraction = 0.20f;      // teleport step as fraction of distance when stuck
+    inline constexpr float kFriendCatchupDistanceThreshold = 4000.0f; // if farther than this on stuck, teleport within 4000
+
+    // Sound system
+    inline constexpr const char* kDefaultSoundsFolder = "sounds";   // relative to CWD
+    inline constexpr int   kSoundGroupRetryCount = 3;               // retries when a sound fails to play
+    inline constexpr const char* kFriendAmbientSoundGroup = "ambient";    // group for periodic idle sounds
+
+    // WAV 3D attenuation (used when playing .wav files via SpawnSoundAttached)
+    inline constexpr float kFriendAmbientInnerRadius      = 300.0f;  // full-volume sphere radius (cm)
+    inline constexpr float kFriendAmbientAttenuationRadius = 5000.0f; // distance at which sound is inaudible
+    inline constexpr float kFriendAmbientLpfStartRadius   = 1000.0f; // distance at which LPF starts rolling off
+
+    // Cleanup delay to avoid removing media instances that are still preparing/loading
+    inline constexpr float kMediaStaleCleanupDelaySeconds = 0.5f;    // seconds
+    inline constexpr const char* kFriendEnemySpottedSoundGroup = "enemyspotted";
+    inline constexpr const char* kFriendTragedySoundGroup = "tragedy";
 }

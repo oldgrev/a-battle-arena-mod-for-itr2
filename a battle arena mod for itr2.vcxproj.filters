@@ -128,5 +128,11 @@
     <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp">
       <Filter>Source Files\SDK</Filter>
     </ClCompile>
+    <ClCompile Include="Mod\LoadoutSubsystem.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\MediaAssets_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

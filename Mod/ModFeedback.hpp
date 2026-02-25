@@ -27,4 +27,64 @@ namespace Mod::ModFeedback
 
     // Play a 3D sound at a world location.
     void PlaySoundAtLocation(SDK::USoundBase* sound, const SDK::FVector& location, float volume = 1.0f, float pitch = 1.0f);
+
+    // Load a sound asset by Unreal soft object path and play it in 2D.
+    bool PlaySoundAsset2D(const std::string& softObjectPath, float volume = 1.0f, float pitch = 1.0f, bool isUiSound = true, std::string* outError = nullptr);
+
+    // Load a sound asset by Unreal soft object path and play it at the local player location (3D).
+    bool PlaySoundAsset3DAtPlayer(const std::string& softObjectPath, float volume = 1.0f, float pitch = 1.0f, std::string* outError = nullptr);
+
+    // Play a local media file (e.g. mp3) through Unreal's media framework audio path.
+    bool PlayMediaFile2D(const std::string& filePath, bool loop, float volume, std::string* outError = nullptr);
+
+    // Play a streaming media URL through Unreal's media framework audio path.
+    bool PlayMediaUrl2D(const std::string& url, bool loop, float volume, std::string* outError = nullptr);
+
+    // Play a local media file attached to a moving actor (true 3D follow audio).
+    bool PlayMediaFileAttached3D(const std::string& actorSelector, const std::string& filePath, bool loop, float volume, std::string* outResolvedActor = nullptr, std::string* outError = nullptr);
+
+    // Play a streaming media URL attached to a moving actor (true 3D follow audio).
+    bool PlayMediaUrlAttached3D(const std::string& actorSelector, const std::string& url, bool loop, float volume, std::string* outResolvedActor = nullptr, std::string* outError = nullptr);
+
+    // Stop and clear all media players started by this mod.
+    int StopAllMedia();
+
+    // Return compact state for active media instances.
+    std::string DescribeActiveMedia(std::size_t maxEntries = 16);
+
+    // Scan a folder for sound files and build playback groups from filename prefixes.
+    // Also parses .txt files in the folder: each line is a file path or URL, inheriting
+    // the group name from the .txt filename. Groups are cumulative across files and .txts.
+    bool ScanSoundGroupsFromFolder(const std::string& folderPath, std::string* outError = nullptr);
+
+    // Return a compact summary of loaded sound groups.
+    std::string DescribeSoundGroups(std::size_t maxGroups = 20, std::size_t maxEntriesPerGroup = 5);
+
+    // Pick a random sound from a group and play it through the media pipeline (2D).
+    // Discerns file vs URL automatically. Retries up to kSoundGroupRetryCount times on failure.
+    bool PlayRandomSoundGroup2D(const std::string& groupName, bool loop, float volume, std::string* outChosenFile = nullptr, std::string* outError = nullptr);
+
+    // Returns true if any tracked media instance is currently playing for the given actor.
+    bool IsMediaPlayingForActor(SDK::AActor* actor);
+
+    // Stops and destroys any tracked media instances for the given actor. Returns count stopped.
+    int StopMediaForActor(SDK::AActor* actor);
+
+    // Play a local media file attached to a specific actor (takes actor pointer directly, no string selector).
+    bool PlayMediaFileAttachedToActor(SDK::AActor* actor, const std::string& filePath, bool loop, float volume, std::string* outError = nullptr);
+
+    // Play a streaming URL attached to a specific actor (takes actor pointer directly).
+    bool PlayMediaUrlAttachedToActor(SDK::AActor* actor, const std::string& url, bool loop, float volume, std::string* outError = nullptr);
+
+    // Play a 16-bit PCM .wav file as true 3D spatial audio attached to a moving actor.
+    // Uses SpawnSoundAttached (not UMediaPlayer) so attenuation and 3D positioning work correctly.
+    bool PlayWavAttachedToActor(SDK::AActor* actor, const std::string& filePath, bool loop, float volume, std::string* outError = nullptr);
+
+    // Pick a random sound from a group and play it as 3D audio attached to the given actor.
+    // Discerns file vs URL. Retries on failure. Outputs the chosen entry path/url.
+    bool PlayRandomSoundGroupAttachedToActor(SDK::AActor* actor, const std::string& groupName, bool loop, float volume, std::string* outChosenEntry = nullptr, std::string* outError = nullptr);
+
+    // Probe and initialise the default sounds folder (sounds/ relative to CWD).
+    // Logs whether it exists and scans it. Safe to call at mod startup.
+    void InitSoundSystem();
 }

@@ -97,6 +97,7 @@ namespace Mod
         std::atomic<bool> fatigueDisabled_{false};
         std::atomic<bool> bulletTimeActive_{false};
         std::atomic<float> bulletTimeScale_{0.2f};
+        std::atomic<bool> bulletTimeDirty_{true};
 
         // additional cheat state
         std::atomic<bool> noClipActive_{false};
@@ -129,9 +130,12 @@ namespace Mod
 
         // Track original light intensities so scaling is stable (no compounding each tick)
         std::unordered_map<SDK::ULightComponentBase*, float> portableLightOriginalIntensity_;
-        std::chrono::steady_clock::time_point nextPortableLightScan_{};
         std::atomic<float> portableLightIntensityScale_{1.0f};
         std::atomic<bool> portableLightScaleDirty_{true};
+        SDK::UWorld* lastPortableLightWorld_{nullptr};
+
+        SDK::UWorld* lastBulletTimeWorld_{nullptr};
+        SDK::ABP_RadiusPlayerCharacter_Gameplay_C* lastBulletTimePlayer_{nullptr};
         uint32_t portableLightLogCounter_{0};
     };
 }

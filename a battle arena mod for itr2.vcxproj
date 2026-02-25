@@ -159,6 +159,7 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="Mod\AISubsystem.hpp" />
     <ClInclude Include="Mod\ArenaSubsystem.hpp" />
+    <ClInclude Include="Mod\FriendSubsystem.hpp" />
     <ClInclude Include="Mod\Cheats.hpp" />
     <ClInclude Include="Mod\CommandHandler.hpp" />
     <ClInclude Include="Mod\CommandQueue.hpp" />
@@ -174,15 +175,18 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CppSDK\SDK\AIModule_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\AudioMixer_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\Basic.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_RadiusPlayerCharacter_Gameplay_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\CoreUObject_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\Engine_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\IntoTheRadius2_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\MediaAssets_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Mod\AISubsystem.cpp" />
     <ClCompile Include="Mod\ArenaSubsystem.cpp" />
+    <ClCompile Include="Mod\FriendSubsystem.cpp" />
     <ClCompile Include="Mod\Cheats.cpp" />
     <ClCompile Include="Mod\CommandHandler.cpp" />
     <ClCompile Include="Mod\GameContext.cpp" />

@@ -198,6 +198,7 @@ namespace Mod
     void Cheats::ToggleBulletTime()
     {
         bulletTimeActive_ = !bulletTimeActive_;
+        bulletTimeDirty_.store(true, std::memory_order_release);
 
         LOG_INFO("[Cheats] Bullet Time " << (bulletTimeActive_ ? "enabled" : "disabled") << " (Scale: " << bulletTimeScale_ << ")");
 
@@ -217,8 +218,14 @@ namespace Mod
     {
         if (scale <= 0.0f) scale = Mod::Tuning::kBulletTimeMinScale;
         if (scale > Mod::Tuning::kBulletTimeMaxScale) scale = Mod::Tuning::kBulletTimeMaxScale;
-        
-        bulletTimeScale_ = scale;
+
+        const float current = bulletTimeScale_.load(std::memory_order_relaxed);
+        if (std::fabs(current - scale) > 0.0001f)
+        {
+            bulletTimeScale_.store(scale, std::memory_order_relaxed);
+            bulletTimeDirty_.store(true, std::memory_order_release);
+        }
+
         LOG_INFO("[Cheats] Bullet Time scale set to " << scale);
     }
 
@@ -352,8 +359,12 @@ namespace Mod
         if (scale < 0.05f) scale = 0.05f;
         if (scale > 20.0f) scale = 20.0f;
 
-        portableLightIntensityScale_.store(scale, std::memory_order_relaxed);
-        portableLightScaleDirty_.store(true, std::memory_order_release);
+        const float current = portableLightIntensityScale_.load(std::memory_order_relaxed);
+        if (std::fabs(current - scale) > 0.0001f)
+        {
+            portableLightIntensityScale_.store(scale, std::memory_order_relaxed);
+            portableLightScaleDirty_.store(true, std::memory_order_release);
+        }
 
         std::wstringstream msg;
         msg << L"[Mod] Light brightness scale: " << scale;
@@ -399,7 +410,10 @@ namespace Mod
         // Clear any cached light pointers/intensities on level change.
         portableLightOriginalIntensity_.clear();
         portableLightScaleDirty_.store(true, std::memory_order_release);
-        nextPortableLightScan_ = std::chrono::steady_clock::time_point{};
+        lastPortableLightWorld_ = nullptr;
+        lastBulletTimeWorld_ = nullptr;
+        lastBulletTimePlayer_ = nullptr;
+        bulletTimeDirty_.store(true, std::memory_order_release);
         
         LOG_INFO("[Cheats] All cheats deactivated");
     }
@@ -421,12 +435,6 @@ namespace Mod
         if (isDefault && !dirty)
             return;
 
-        const auto now = std::chrono::steady_clock::now();
-        if (!dirty && nextPortableLightScan_ != std::chrono::steady_clock::time_point{} && now < nextPortableLightScan_)
-            return;
-
-        // Even when scaled, scan infrequently to catch newly spawned/attached lights.
-        nextPortableLightScan_ = now + std::chrono::seconds(2);
         portableLightScaleDirty_.store(false, std::memory_order_release);
 
         if (!SDK::UObject::GObjects)
@@ -489,12 +497,28 @@ namespace Mod
         }
     }
 
+    // do we really need to do all of this every single frame?
+    // sloppy work....
     void Cheats::Update(SDK::UWorld *world)
     {
         if (!world)
             return;
 
         auto *player = FindPlayer(world);
+
+        if (world != lastBulletTimeWorld_ || player != lastBulletTimePlayer_)
+        {
+            lastBulletTimeWorld_ = world;
+            lastBulletTimePlayer_ = player;
+            bulletTimeDirty_.store(true, std::memory_order_release);
+        }
+
+        if (world != lastPortableLightWorld_)
+        {
+            lastPortableLightWorld_ = world;
+            portableLightOriginalIntensity_.clear();
+            portableLightScaleDirty_.store(true, std::memory_order_release);
+        }
 
         if (player && godModeActive_.load())
         {
@@ -506,22 +530,28 @@ namespace Mod
             ApplyStatsCheats(player);
         }
 
-        // Apply Bullet Time
-        float targetGlobalDilation = bulletTimeActive_.load() ? bulletTimeScale_.load() : 1.0f;
-        SDK::UGameplayStatics::SetGlobalTimeDilation(world, targetGlobalDilation);
+        const bool bulletDirty = bulletTimeDirty_.exchange(false, std::memory_order_acq_rel);
+        const float targetGlobalDilation = bulletTimeActive_.load() ? bulletTimeScale_.load() : 1.0f;
+        if (bulletDirty)
+        {
+            SDK::UGameplayStatics::SetGlobalTimeDilation(world, targetGlobalDilation);
+        }
 
         if (player)
         {
             // Player CustomTimeDilation should be 1/GlobalDilation to maintain normal speed
             float targetPlayerDilation = 1.0f / targetGlobalDilation;
-            
-            if (player->CustomTimeDilation != targetPlayerDilation)
+
+            if (bulletDirty && player->CustomTimeDilation != targetPlayerDilation)
             {
                 player->CustomTimeDilation = targetPlayerDilation;
             }
 
-            // Apply to held items and potentially arms if they are separate actors/components
-            UpdateHeldItemsDilation(world, targetPlayerDilation, player);
+            // Apply to held items and potentially arms only when bullet-time settings/context changes.
+            if (bulletDirty)
+            {
+                UpdateHeldItemsDilation(world, targetPlayerDilation, player);
+            }
 
             // Periodic durability check
             static uint32_t lastCheck = 0;
@@ -536,10 +566,14 @@ namespace Mod
             }
         }
 
-        // Flashlight/headlamp brightness scaling (runs infrequently; safe even if player is null)
-        ApplyPortableLightBrightness(world, player);
+        // Flashlight/headlamp brightness scaling only when setting/context changes.
+        if (portableLightScaleDirty_.load(std::memory_order_acquire))
+        {
+            ApplyPortableLightBrightness(world, player);
+        }
     }
 
+    // body dilation doesn't even work, arms and the player weapon move so slow which is crap in vr. to do
     void Cheats::UpdateHeldItemsDilation(SDK::UWorld *world, float targetDilation, SDK::ABP_RadiusPlayerCharacter_Gameplay_C *player)
     {
         if (!world || !player) return;
@@ -593,6 +627,12 @@ namespace Mod
 
     void Cheats::ApplyDurabilityFix(SDK::UWorld *world, SDK::ABP_RadiusPlayerCharacter_Gameplay_C *player)
     {
+        // this currently only applies to the primary object of the weapon.
+        // i.e.  dust covers etc don't have their durability fixed by this
+        // later should modify it to do an initial recurse when an item is grabbed
+        // but hook the actual durability change function to prevent durability loss, for speed.
+
+
         if (!world) return;
 
         SDK::TArray<SDK::AActor *> actors;
@@ -635,6 +675,10 @@ namespace Mod
                             // If it's a delta, we add enough to reach max. 
                             // If it's a setter (less likely via Change), we'd just pass max.
                             // In ITR2 delta is typically used.
+
+                            // the above were the ai comments, I don't know about that. 
+                            // i'd just set the max durability every time instead of doing the extra maths.
+                            // cpu cycles don't grow on trees. I blame the kids these days.
                             if (currentDurability < maxDurability)
                             {
                                 float delta = maxDurability - currentDurability;
@@ -648,6 +692,9 @@ namespace Mod
         }
     }
 
+    // this function makes me wonder how many other classes and functions need to find the player
+    // it'd be better off having the main mod class expose some kind of GetPlayer() function which
+    // caches and manages some sort of refresh logic. This is not fine.
     SDK::ABP_RadiusPlayerCharacter_Gameplay_C *Cheats::FindPlayer(SDK::UWorld *world)
     {
         // Use the SDK helper to get the player pawn
@@ -673,6 +720,8 @@ namespace Mod
 
     void Cheats::ApplyGodMode(SDK::ABP_RadiusPlayerCharacter_Gameplay_C *player)
     {
+        // it's probably more efficient to find the ways I call this and then do a lot of this there
+        // because all the other stuff probably needs the same checks
         if (!player)
             return;
 
@@ -697,11 +746,14 @@ namespace Mod
         // Max health - use a reasonable value (100 is typical for this game)
         float maxHealth = 100.0f;
 
-        //LOG_INFO("[Cheats] Current Health: " << currentHealth << " / " << maxHealth);
-
         // If health is below max, restore it by calling Server_ChangeHealth with positive delta
-        if (currentHealth < maxHealth)
+        // unless it's less than 0, which means you've taken big damage and may be stuck in a damage zone which
+        // would result in a constant cycle of load game popups (ask me how I know)
+        if (currentHealth < maxHealth && currentHealth > 0.0f)
         {
+            // i could hook it so that any call to change health with a negative delta is ignored
+            // but this way we see the red screen pulse indicating damaged followed by the green screen pulse indicating healing
+            // and sufficiently damaging things (like going in red water), will still end the player.
             float healthDelta = maxHealth - currentHealth;
             playerStats->Server_ChangeHealth(healthDelta, nullptr, nullptr);
             LOG_INFO("[Cheats] Restored " << healthDelta << " health");
@@ -728,6 +780,9 @@ namespace Mod
             // simply resetting it to a very high value each frame prevents any
             // accumulation. matching the Lua script we use 10k as a safe upper bound.
             playerStats->CurrentHunger = 65535.0f;
+            // this doesn't work like i'd expect. I might just hook the hunger functions
+            // to just pass through and do nothing, which would technically be an optimization!
+            // alexa, put it on the to do list.
         }
 
         if (fatigueDisabled_.load())
@@ -737,6 +792,7 @@ namespace Mod
             // allowed tiny losses over time.)
             float maxStamina = playerStats->GetMaxStaminaAffectedByHunger();
             playerStats->CurrentStamina = maxStamina;
+            // another one for hooking
         }
     }
 

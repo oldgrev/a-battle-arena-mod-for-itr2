@@ -60,45 +60,21 @@ namespace Mod
         std::string SanitizeCommandLine(const std::string &value)
         {
             std::string trimmed = TrimWhitespace(value);
-            std::vector<std::string> tokens;
-            std::string current;
+            std::string sanitized;
+            sanitized.reserve(trimmed.size());
 
             for (char ch : trimmed)
             {
-                if (std::isspace(static_cast<unsigned char>(ch)))
+                if (std::isspace(static_cast<unsigned char>(ch)) || ch == '"' || ch == '\'')
                 {
-                    if (!current.empty())
-                    {
-                        tokens.push_back(std::move(current));
-                        current.clear();
-                    }
+                    sanitized.push_back(ch);
                     continue;
                 }
 
                 if (IsAllowedChar(ch))
                 {
-                    current.push_back(ch);
+                    sanitized.push_back(ch);
                 }
-            }
-
-            if (!current.empty())
-            {
-                tokens.push_back(std::move(current));
-            }
-
-            std::string sanitized;
-            for (size_t i = 0; i < tokens.size(); ++i)
-            {
-                if (tokens[i].empty())
-                {
-                    continue;
-                }
-
-                if (!sanitized.empty())
-                {
-                    sanitized.push_back(' ');
-                }
-                sanitized.append(tokens[i]);
             }
 
             return sanitized;

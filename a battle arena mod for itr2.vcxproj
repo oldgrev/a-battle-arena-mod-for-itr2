@@ -169,6 +169,7 @@
     <ClInclude Include="Mod\Logging.hpp" />
     <ClInclude Include="Mod\ModFeedback.hpp" />
     <ClInclude Include="Mod\ModMain.hpp" />
+    <ClInclude Include="Mod\SpatialAudio.hpp" />
     <ClInclude Include="Mod\RuntimeState.hpp" />
     <ClInclude Include="Mod\TcpServer.hpp" />
     <ClInclude Include="pch.h" />
@@ -182,6 +183,7 @@
     <ClCompile Include="CppSDK\SDK\Engine_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\IntoTheRadius2_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\MediaAssets_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\Synthesis_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Mod\AISubsystem.cpp" />
@@ -195,6 +197,7 @@
     <ClCompile Include="Mod\LoadoutSubsystem.cpp" />
     <ClCompile Include="Mod\ModFeedback.cpp" />
     <ClCompile Include="Mod\ModMain.cpp" />
+    <ClCompile Include="Mod\SpatialAudio.cpp" />
     <ClCompile Include="Mod\RuntimeState.cpp" />
     <ClCompile Include="Mod\TcpServer.cpp" />
   </ItemGroup>

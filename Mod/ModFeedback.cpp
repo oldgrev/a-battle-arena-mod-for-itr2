@@ -1,44 +1,38 @@
 
-
 #include "ModFeedback.hpp"
 
 /*
 AILEARNINGS
-Symptom (subtitle_test): Mod subtitle messages were "sent" (logs) but nothing showed in the HMD.
-Trace evidence: our ProcessEvent target object was the CDO: `BP_RadiusPlayerCharacter_Gameplay.Default__BP_RadiusPlayerCharacter_Gameplay_C`.
-Counter-evidence: game-generated empty-gun warning called the same `ShowSubtitles` function on the live in-level actor: `L_Forest.L_Forest.PersistentLevel.BP_RadiusPlayerCharacter_Gameplay_C_...`.
-Root cause: our player lookup could return the class default object (CDO) via a naive GObjects scan fallback; calling gameplay events (like `ShowSubtitles`) on the CDO is a no-op.
-Fix: `GameContext::GetPlayerCharacter()` now filters out default objects (`UObject::IsDefaultObject()`), prefers `PlayerController -> Pawn` / GameplayStatics paths, and only uses a world-matching scan as a last resort.
-String lifetime gotcha: Dumper-7 `SDK::FString` is a non-owning view; pointing it at temporary buffers can UAF in deferred UI paths.
-Fix: build messages in `std::wstring` and use a thread-local ring of backing buffers (`MakeStableFString`).
-Symptom (media playback): `media_file` / `media_url` / `playrandomsound` reported generic "media play failed" and produced no audible output.
-Root cause: 2D media path instantiated a `UMediaPlayer` but did not reliably provide an audio sink component in-world, and diagnostics did not surface the player's runtime state.
-Fix: spawn and register a `UMediaSoundComponent` attached to player root for 2D media playback, set `PlayOnOpen`, and include detailed player state (`ready/preparing/buffering/connecting/playing/url/player`) in logs and command errors.
-Symptom (3D media crashes 2026-02-26): Friend NPCs with attached 3D audio caused intermittent crashes shortly after media playback started.
-Root cause: Media components attached to actors were not cleaned up when actors became invalid or were destroyed. The gActiveMedia vector accumulated stale references with dangling actor pointers.
-Fix: Added CleanupStaleMedia() function called from DrainPending() every frame. It checks each media instance for invalid players, invalid owner actors (for 3D attached audio), and naturally finished playback. Stale instances are properly closed (Player->Close()), components destroyed (K2_DestroyComponent), and removed from the tracking vector.
-Additional timing fix: do not clean up newly-started players while they are still preparing. Each media entry records a start time and retains itself for at least kMediaStaleCleanupDelaySeconds before being eligible for automatic removal.
-Symptom (3D audio not spatializing 2026-02-26): 3D audio attached to friend NPCs sounded centered on the player (equal volume in both ears) even when NPC was 3000 units away.
-Root cause: SpawnAttachedMediaSoundComponent enabled bAllowSpatialization but did not configure attenuation settings. Without attenuation overrides, the sound component used default settings (no distance falloff).
-Fix: Set bOverrideAttenuation = true and configured AttenuationOverrides struct with: bAttenuate=true, bSpatialize=true, Linear distance algorithm, Sphere shape, FalloffDistance=5000 units, dBAttenuationAtMax=-60dB. Also added low-pass filtering (bAttenuateWithLPF=true, LPF kicks in at 1000 units, fully muffled by 5000 units) for distance realism.
+Audio playback history:
+  - UMediaPlayer + UMediaSoundComponent: worked for 2D but 3D attachment always produced
+    centered/non-spatialized output regardless of bAllowSpatialization settings.
+  - USoundWave raw-PCM direct injection (offset writes): engine audio mixdown never
+    recognized the data; GetPlayState() showed Stopped immediately after Play().
+  - USynthSamplePlayer + USoundWave: IsPlaying() returned true but no audible output;
+    engine expects USoundWave to come from proper asset import pipeline.
+  - Final working solution: bypass UE audio entirely. Parse .wav files ourselves, apply
+    3D spatial processing (stereo pan/ILD, distance attenuation, LPF), and output through
+    the Windows waveOut API. This is implemented in SpatialAudio.hpp/cpp.
+Subtitle system (ShowSubtitles): kept as-is, routes through player character's HMD UI.
+  - CDO trap: GetPlayerCharacter() can return Default__ (CDO); ShowSubtitles on CDO is a no-op.
+  - FString lifetime: SDK::FString is non-owning; use MakeStableFString ring buffer.
 */
 
 #include "GameContext.hpp"
 #include "Logging.hpp"
 #include "ModTuning.hpp"
+#include "SpatialAudio.hpp"
 
 #include <Windows.h>
 
-#include <array>
-#include <atomic>
 #include <algorithm>
+#include <atomic>
+#include <array>
 #include <cctype>
 #include <cmath>
-#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -51,27 +45,9 @@ namespace Mod::ModFeedback
 {
     namespace
     {
-        template <typename ElementType>
-        struct TArrayRaw
-        {
-            ElementType* Data;
-            int32_t NumElements;
-            int32_t MaxElements;
-        };
-
-        template <typename ElementType>
-        static int32_t GetTArrayNum(const SDK::TArray<ElementType>& arr)
-        {
-            const auto* raw = reinterpret_cast<const TArrayRaw<ElementType>*>(&arr);
-            return raw ? raw->NumElements : 0;
-        }
-
-        template <typename ElementType>
-        static ElementType* GetTArrayData(const SDK::TArray<ElementType>& arr)
-        {
-            const auto* raw = reinterpret_cast<const TArrayRaw<ElementType>*>(&arr);
-            return raw ? raw->Data : nullptr;
-        }
+        // -----------------------------------------------------------------
+        // Subtitle/message infrastructure (kept from original)
+        // -----------------------------------------------------------------
 
         struct PendingMessage
         {
@@ -84,29 +60,9 @@ namespace Mod::ModFeedback
         static std::deque<PendingMessage> gPending;
         static std::atomic<bool> gDraining{false};
 
-        struct ActiveMediaInstance
-        {
-            SDK::UMediaPlayer* Player = nullptr;
-            SDK::UMediaSoundComponent* SoundComponent = nullptr;
-            SDK::AActor* OwnerActor = nullptr;
-            std::string Descriptor;
-            bool IsAttached3D = false;
-            float StartTime = 0.0f; // world time when playback began
-        };
-
-        static std::mutex gMediaMutex;
-        static std::vector<ActiveMediaInstance> gActiveMedia;
-
-        // --- WAV-based 3D audio tracking (USoundWave + SpawnSoundAttached) ---
-        struct ActiveWavInstance
-        {
-            SDK::UAudioComponent* AudioComp = nullptr; // returned by SpawnSoundAttached
-            SDK::AActor*          OwnerActor = nullptr;
-            uint8_t*              PcmBuffer  = nullptr; // heap buffer; freed when done
-            std::string           Descriptor;
-        };
-        static std::mutex gWavMutex;
-        static std::vector<ActiveWavInstance> gActiveWav;
+        // -----------------------------------------------------------------
+        // Sound group system (kept from original)
+        // -----------------------------------------------------------------
 
         static std::mutex gSoundGroupMutex;
         static std::unordered_map<std::string, std::vector<std::string>> gSoundGroups;
@@ -114,8 +70,9 @@ namespace Mod::ModFeedback
         static std::mt19937 gSoundGroupRng{std::random_device{}()};
 
         // -----------------------------------------------------------------
-        // Subtitle test sequence (staggered)
+        // Subtitle test sequence (kept from original)
         // -----------------------------------------------------------------
+
         struct SubtitleTestItem
         {
             std::wstring Text;
@@ -129,14 +86,29 @@ namespace Mod::ModFeedback
         static size_t gTestIndex = 0;
         static std::vector<SubtitleTestItem> gTestItems;
 
-        bool IsValidObject(const SDK::UObject* obj)
+        // -----------------------------------------------------------------
+        // Actor -> SpatialAudio handle tracking for 3D position updates
+        // -----------------------------------------------------------------
+
+        struct TrackedActorSound
         {
-            return obj && SDK::UKismetSystemLibrary::IsValid(obj);
+            SDK::AActor*               actor  = nullptr;
+            SpatialAudio::SoundHandle  handle = SpatialAudio::kInvalidHandle;
+            std::string                descriptor;
+        };
+
+        static std::mutex gTrackedMutex;
+        static std::vector<TrackedActorSound> gTrackedSounds;
+
+        // -----------------------------------------------------------------
+        // Helpers
+        // -----------------------------------------------------------------
+
+        static uint64_t NowTickMs()
+        {
+            return static_cast<uint64_t>(GetTickCount64());
         }
 
-        // UC::FString is a non-owning view. Never point it at temporary buffers.
-        // Use a small ring of persistent buffers so pointers stay valid long enough
-        // for engine code that might defer consumption.
         static SDK::FString MakeStableFString(const std::wstring& value)
         {
             static thread_local std::array<std::wstring, 32> ring;
@@ -152,131 +124,6 @@ namespace Mod::ModFeedback
             return std::wstring(value.begin(), value.end());
         }
 
-        static SDK::USoundBase* LoadSoundAssetBySoftPath(const std::string& softObjectPath, std::string* outError)
-        {
-            if (softObjectPath.empty())
-            {
-                if (outError) *outError = "empty soft object path";
-                return nullptr;
-            }
-
-            const SDK::FString pathF(ToWide(softObjectPath).c_str());
-            const SDK::FSoftObjectPath softPath = SDK::UKismetSystemLibrary::MakeSoftObjectPath(pathF);
-            const SDK::TSoftObjectPtr<SDK::UObject> softRef = SDK::UKismetSystemLibrary::Conv_SoftObjPathToSoftObjRef(softPath);
-            SDK::UObject* loaded = SDK::UKismetSystemLibrary::LoadAsset_Blocking(softRef);
-
-            if (!loaded)
-            {
-                if (outError) *outError = "asset not found/load failed";
-                return nullptr;
-            }
-
-            if (!loaded->IsA(SDK::USoundBase::StaticClass()))
-            {
-                if (outError) *outError = std::string("asset is not USoundBase: ") + loaded->GetFullName();
-                return nullptr;
-            }
-
-            return static_cast<SDK::USoundBase*>(loaded);
-        }
-
-        static SDK::UMediaPlayer* SpawnMediaPlayer(std::string* outError)
-        {
-            SDK::UObject* outer = Mod::GameContext::GetWorldContext();
-            if (!outer)
-            {
-                if (outError) *outError = "world context is null";
-                return nullptr;
-            }
-
-            SDK::UObject* spawned = SDK::UGameplayStatics::SpawnObject(SDK::UMediaPlayer::StaticClass(), outer);
-            if (!spawned || !spawned->IsA(SDK::UMediaPlayer::StaticClass()))
-            {
-                if (outError) *outError = "failed to spawn UMediaPlayer";
-                return nullptr;
-            }
-
-            SDK::UMediaPlayer* player = static_cast<SDK::UMediaPlayer*>(spawned);
-            player->PlayOnOpen = true;
-            return player;
-        }
-
-        static std::string DescribeMediaPlayerState(SDK::UMediaPlayer* player)
-        {
-            if (!player)
-                return "player=<null>";
-
-            std::ostringstream oss;
-            oss << "playerName=" << player->GetPlayerName().ToString()
-                << " playing=" << (player->IsPlaying() ? 1 : 0)
-                << " ready=" << (player->IsReady() ? 1 : 0)
-                << " preparing=" << (player->IsPreparing() ? 1 : 0)
-                << " buffering=" << (player->IsBuffering() ? 1 : 0)
-                << " connecting=" << (player->IsConnecting() ? 1 : 0)
-                << " paused=" << (player->IsPaused() ? 1 : 0)
-                << " closed=" << (player->IsClosed() ? 1 : 0)
-                << " hasError=" << (player->HasError() ? 1 : 0)
-                << " canPause=" << (player->CanPause() ? 1 : 0)
-                << " supportsSeeking=" << (player->SupportsSeeking() ? 1 : 0)
-                << " url='" << player->GetUrl().ToString() << "'";
-            return oss.str();
-        }
-
-        static bool StartMediaPlayback(SDK::UMediaPlayer* player, bool loop, float volume)
-        {
-            if (!player)
-                return false;
-
-            if (volume < 0.0f) volume = 0.0f;
-            if (volume > 4.0f) volume = 4.0f;
-
-            player->SetLooping(loop);
-            player->SetNativeVolume(volume);
-
-            if (!player->IsPlaying())
-            {
-                if (player->Play())
-                    return true;
-
-                if (player->IsPlaying())
-                    return true;
-
-                if (player->IsPreparing() || player->IsConnecting() || player->IsBuffering())
-                    return true;
-
-                if (player->Reopen())
-                {
-                    if (player->Play() || player->IsPlaying() || player->IsPreparing() || player->IsConnecting() || player->IsBuffering())
-                        return true;
-                }
-
-                return false;
-            }
-            return true;
-        }
-
-        static bool PlayMediaCommonOpenResult(SDK::UMediaPlayer* player, bool opened, bool loop, float volume, const std::string& descriptor, std::string* outError)
-        {
-            if (!opened)
-            {
-                const std::string state = DescribeMediaPlayerState(player);
-                if (outError) *outError = "media open failed; " + state;
-                LOG_ERROR("[ModFeedback] Media open failed (" << descriptor << ") :: " << state);
-                return false;
-            }
-
-            if (!StartMediaPlayback(player, loop, volume))
-            {
-                const std::string state = DescribeMediaPlayerState(player);
-                if (outError) *outError = "media play failed; " + state;
-                LOG_ERROR("[ModFeedback] Media play failed (" << descriptor << ") :: " << state);
-                return false;
-            }
-
-            LOG_INFO("[ModFeedback] Media playback started (" << descriptor << ", loop=" << (loop ? "true" : "false") << ", volume=" << volume << ") :: " << DescribeMediaPlayerState(player));
-            return true;
-        }
-
         static std::string ToLowerCopy(const std::string& value)
         {
             std::string out = value;
@@ -287,7 +134,6 @@ namespace Mod::ModFeedback
             return out;
         }
 
-        // Returns true if the given entry string looks like an http(s) URL.
         static bool IsUrl(const std::string& entry)
         {
             if (entry.size() >= 7 && entry.compare(0, 7, "http://") == 0)  return true;
@@ -295,7 +141,6 @@ namespace Mod::ModFeedback
             return false;
         }
 
-        // Trim leading/trailing whitespace in place (for txt-line parsing).
         static std::string TrimWhitespace(const std::string& s)
         {
             const auto start = s.find_first_not_of(" \t\r\n");
@@ -304,14 +149,228 @@ namespace Mod::ModFeedback
             return s.substr(start, end - start + 1);
         }
 
-        static double DistSq(const SDK::FVector& a, const SDK::FVector& b)
+        static bool IsSupportedAudioExtension(const std::filesystem::path& path)
         {
-            const double dx = (double)a.X - (double)b.X;
-            const double dy = (double)a.Y - (double)b.Y;
-            const double dz = (double)a.Z - (double)b.Z;
-            return dx * dx + dy * dy + dz * dz;
+            static const std::unordered_set<std::string> exts = {
+                ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".wma"
+            };
+            const std::string ext = ToLowerCopy(path.extension().string());
+            return exts.find(ext) != exts.end();
         }
 
+        static std::string DeriveGroupName(const std::filesystem::path& path)
+        {
+            std::string stem = ToLowerCopy(path.stem().string());
+            if (stem.empty())
+                return "default";
+
+            const std::size_t dash = stem.find('-');
+            if (dash != std::string::npos && dash > 0)
+                return stem.substr(0, dash);
+
+            while (!stem.empty())
+            {
+                const unsigned char ch = static_cast<unsigned char>(stem.back());
+                if (std::isdigit(ch) || stem.back() == '_' || stem.back() == '-')
+                {
+                    stem.pop_back();
+                    continue;
+                }
+                break;
+            }
+
+            return stem.empty() ? "default" : stem;
+        }
+
+        static bool IsSuppressedWorldNameLower(const std::string& lower)
+        {
+            return (lower.find("l_startup") != std::string::npos) || (lower.find("l_mainmenu") != std::string::npos);
+        }
+
+        static bool ShouldSuppressSubtitlesNow(std::string* outWorldName = nullptr)
+        {
+            SDK::UWorld* world = Mod::GameContext::GetWorld();
+            if (!world)
+            {
+                if (outWorldName) *outWorldName = "<null>";
+                return true;
+            }
+
+            std::string name = world->GetName();
+            if (outWorldName) *outWorldName = name;
+
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            return IsSuppressedWorldNameLower(name);
+        }
+
+        static void EnqueuePending(const std::wstring& text, float seconds, const SDK::FLinearColor& color)
+        {
+            std::lock_guard<std::mutex> lock(gPendingMutex);
+            if (gPending.size() >= 32)
+                gPending.pop_front();
+            gPending.push_back(PendingMessage{text, seconds, color});
+        }
+
+        static std::wstring RepeatChar(wchar_t ch, size_t count)
+        {
+            std::wstring s;
+            s.assign(count, ch);
+            return s;
+        }
+
+        static void UpdateSubtitleTestSequence()
+        {
+            std::lock_guard<std::mutex> lock(gTestMutex);
+            if (!gTestActive)
+                return;
+
+            const uint64_t now = NowTickMs();
+            if (gTestNextTickMs != 0 && now < gTestNextTickMs)
+                return;
+
+            if (gTestIndex >= gTestItems.size())
+            {
+                gTestActive = false;
+                LOG_INFO("[ModFeedback] subtitle_test complete (" << gTestItems.size() << " cases)");
+                return;
+            }
+
+            const SubtitleTestItem& item = gTestItems[gTestIndex++];
+            gTestNextTickMs = now + gTestIntervalMs;
+
+            ShowMessage(item.Text.c_str(), item.Seconds, SDK::FLinearColor{0.8f, 0.9f, 1.0f, 1.0f});
+        }
+
+        // -----------------------------------------------------------------
+        // Actor sound tracking: get player view for listener state
+        // -----------------------------------------------------------------
+
+        static bool GetListenerState(
+            SpatialAudio::Vec3& outPos,
+            SpatialAudio::Vec3& outFwd,
+            SpatialAudio::Vec3& outRight)
+        {
+            SDK::UWorld* world = Mod::GameContext::GetWorld();
+            if (!world) return false;
+
+            SDK::FVector viewLoc{};
+            SDK::FRotator viewRot{};
+            if (!Mod::GameContext::GetPlayerView(world, viewLoc, viewRot))
+                return false;
+
+            outPos = { static_cast<float>(viewLoc.X), static_cast<float>(viewLoc.Y), static_cast<float>(viewLoc.Z) };
+
+            // Get forward and right vectors from the player rotation
+            const SDK::FVector fwd = SDK::UKismetMathLibrary::GetForwardVector(viewRot);
+            const SDK::FVector right = SDK::UKismetMathLibrary::GetRightVector(viewRot);
+
+            outFwd   = { static_cast<float>(fwd.X), static_cast<float>(fwd.Y), static_cast<float>(fwd.Z) };
+            outRight = { static_cast<float>(right.X), static_cast<float>(right.Y), static_cast<float>(right.Z) };
+            return true;
+        }
+
+        // Update all tracked actor-sound positions and clean up stale entries.
+        // Called from DrainPending (every tick). SpatialAudio::Tick internally
+        // throttles position recomputation to ~10fps.
+        static void UpdateTrackedActorPositions()
+        {
+            SpatialAudio::Vec3 listenerPos, listenerFwd, listenerRight;
+            bool hasListener = GetListenerState(listenerPos, listenerFwd, listenerRight);
+
+            if (hasListener)
+                SpatialAudio::SetListenerState(listenerPos, listenerFwd, listenerRight);
+
+            std::lock_guard<std::mutex> lock(gTrackedMutex);
+
+            // Clean up entries where actor is invalid or sound has finished
+            gTrackedSounds.erase(
+                std::remove_if(gTrackedSounds.begin(), gTrackedSounds.end(),
+                    [](const TrackedActorSound& t)
+                    {
+                        if (!SpatialAudio::IsPlaying(t.handle))
+                        {
+                            LOG_INFO("[ModFeedback] Tracked sound finished: " << t.descriptor);
+                            return true;
+                        }
+                        if (t.actor && !SDK::UKismetSystemLibrary::IsValid(t.actor))
+                        {
+                            LOG_INFO("[ModFeedback] Tracked actor invalid, stopping sound: " << t.descriptor);
+                            SpatialAudio::Stop(t.handle);
+                            return true;
+                        }
+                        return false;
+                    }),
+                gTrackedSounds.end());
+
+            // Update source positions for surviving entries
+            for (auto& t : gTrackedSounds)
+            {
+                if (!t.actor || !SDK::UKismetSystemLibrary::IsValid(t.actor))
+                    continue;
+                SDK::FVector loc = t.actor->K2_GetActorLocation();
+                SpatialAudio::SetSourcePosition(t.handle, { static_cast<float>(loc.X), static_cast<float>(loc.Y), static_cast<float>(loc.Z) });
+            }
+
+            // Drive the SpatialAudio tick (throttled internally to ~10fps)
+            SpatialAudio::Tick();
+        }
+
+        // Register a 3D sound handle as tracked against an actor for position updates.
+        static void TrackActorSound(SDK::AActor* actor, SpatialAudio::SoundHandle handle, const std::string& descriptor)
+        {
+            std::lock_guard<std::mutex> lock(gTrackedMutex);
+            gTrackedSounds.push_back({ actor, handle, descriptor });
+        }
+
+        // Play a wav file with 3D spatial audio attached to an actor.
+        // Reads player view for initial listener state and registers for position tracking.
+        static bool PlayWavSpatial3D(
+            SDK::AActor* actor,
+            const std::string& filePath,
+            bool loop,
+            float volume,
+            std::string* outError)
+        {
+            if (!actor)
+            {
+                if (outError) *outError = "actor is null";
+                return false;
+            }
+
+            // Get current listener state
+            SpatialAudio::Vec3 listenerPos, listenerFwd, listenerRight;
+            if (!GetListenerState(listenerPos, listenerFwd, listenerRight))
+            {
+                if (outError) *outError = "cannot get player view for listener state";
+                return false;
+            }
+
+            // Get actor position
+            SDK::FVector actorLoc = actor->K2_GetActorLocation();
+            SpatialAudio::Vec3 sourcePos = { static_cast<float>(actorLoc.X), static_cast<float>(actorLoc.Y), static_cast<float>(actorLoc.Z) };
+
+            std::string err;
+            SpatialAudio::SoundHandle handle = SpatialAudio::Play3D(
+                filePath, sourcePos, listenerPos, listenerFwd, listenerRight,
+                volume, loop, &err);
+
+            if (handle == SpatialAudio::kInvalidHandle)
+            {
+                if (outError) *outError = err;
+                LOG_ERROR("[ModFeedback] PlayWavSpatial3D failed: " << err << " file='" << filePath << "'");
+                return false;
+            }
+
+            TrackActorSound(actor, handle, filePath);
+            LOG_INFO("[ModFeedback] PlayWavSpatial3D ok (handle=" << handle
+                << ", file='" << filePath << "'"
+                << ", actor='" << actor->GetName() << "'"
+                << ", loop=" << (loop ? 1 : 0)
+                << ", vol=" << volume << ")");
+            return true;
+        }
+
+        // Resolve an actor selector string (player, npc_nearest, substring search).
         static SDK::AActor* ResolveActorSelector(const std::string& selectorRaw, std::string* outResolvedName, std::string* outError)
         {
             const std::string selector = ToLowerCopy(selectorRaw);
@@ -351,8 +410,13 @@ namespace Mod::ModFeedback
 
                 SDK::TArray<SDK::AActor*> actors;
                 SDK::UGameplayStatics::GetAllActorsOfClass(world, SDK::ARadiusAICharacterBase::StaticClass(), &actors);
-                SDK::AActor** data = GetTArrayData(actors);
-                const int32_t count = GetTArrayNum(actors);
+
+                // TArray access
+                struct TRaw { SDK::AActor** Data; int32_t Num; int32_t Max; };
+                auto* raw = reinterpret_cast<const TRaw*>(&actors);
+                SDK::AActor** data = raw->Data;
+                const int32_t count = raw->Num;
+
                 if (!data || count <= 0)
                 {
                     if (outError) *outError = "no NPC actors found";
@@ -364,16 +428,18 @@ namespace Mod::ModFeedback
                 double bestDistSq = (std::numeric_limits<double>::max)();
                 for (int i = 0; i < count; ++i)
                 {
-                    SDK::AActor* actor = data[i];
-                    if (!actor || !SDK::UKismetSystemLibrary::IsValid(actor))
+                    SDK::AActor* a = data[i];
+                    if (!a || !SDK::UKismetSystemLibrary::IsValid(a))
                         continue;
-
-                    const SDK::FVector loc = actor->K2_GetActorLocation();
-                    const double d2 = DistSq(loc, playerLoc);
+                    const SDK::FVector loc = a->K2_GetActorLocation();
+                    const double dx = (double)loc.X - (double)playerLoc.X;
+                    const double dy = (double)loc.Y - (double)playerLoc.Y;
+                    const double dz = (double)loc.Z - (double)playerLoc.Z;
+                    const double d2 = dx * dx + dy * dy + dz * dz;
                     if (d2 < bestDistSq)
                     {
                         bestDistSq = d2;
-                        best = actor;
+                        best = a;
                     }
                 }
 
@@ -387,10 +453,14 @@ namespace Mod::ModFeedback
                 return best;
             }
 
+            // Substring match against all actors
             SDK::TArray<SDK::AActor*> actors;
             SDK::UGameplayStatics::GetAllActorsOfClass(world, SDK::AActor::StaticClass(), &actors);
-            SDK::AActor** data = GetTArrayData(actors);
-            const int32_t count = GetTArrayNum(actors);
+            struct TRaw { SDK::AActor** Data; int32_t Num; int32_t Max; };
+            auto* raw = reinterpret_cast<const TRaw*>(&actors);
+            SDK::AActor** data = raw->Data;
+            const int32_t count = raw->Num;
+
             if (!data || count <= 0)
             {
                 if (outError) *outError = "no actors found";
@@ -399,16 +469,16 @@ namespace Mod::ModFeedback
 
             for (int i = 0; i < count; ++i)
             {
-                SDK::AActor* actor = data[i];
-                if (!actor || !SDK::UKismetSystemLibrary::IsValid(actor))
+                SDK::AActor* a = data[i];
+                if (!a || !SDK::UKismetSystemLibrary::IsValid(a))
                     continue;
 
-                const std::string name = ToLowerCopy(actor->GetName());
-                const std::string full = ToLowerCopy(actor->GetFullName());
+                const std::string name = ToLowerCopy(a->GetName());
+                const std::string full = ToLowerCopy(a->GetFullName());
                 if (name.find(selector) != std::string::npos || full.find(selector) != std::string::npos)
                 {
-                    if (outResolvedName) *outResolvedName = actor->GetName();
-                    return actor;
+                    if (outResolvedName) *outResolvedName = a->GetName();
+                    return a;
                 }
             }
 
@@ -416,229 +486,48 @@ namespace Mod::ModFeedback
             return nullptr;
         }
 
-        static SDK::UMediaSoundComponent* SpawnAttachedMediaSoundComponent(SDK::AActor* actor, std::string* outError)
+        // Helper: load a UE sound asset by soft path (for PlaySound2D / PlaySoundAtLocation)
+        static SDK::USoundBase* LoadSoundAssetBySoftPath(const std::string& softObjectPath, std::string* outError)
         {
-            if (!actor)
+            if (softObjectPath.empty())
             {
-                if (outError) *outError = "target actor is null";
+                if (outError) *outError = "empty soft object path";
                 return nullptr;
             }
 
-            SDK::UObject* added = actor->AddComponentByClass(SDK::UMediaSoundComponent::StaticClass(), true, SDK::FTransform{}, false);
-            if (!added || !added->IsA(SDK::UMediaSoundComponent::StaticClass()))
+            const SDK::FString pathF(ToWide(softObjectPath).c_str());
+            const SDK::FSoftObjectPath softPath = SDK::UKismetSystemLibrary::MakeSoftObjectPath(pathF);
+            const SDK::TSoftObjectPtr<SDK::UObject> softRef = SDK::UKismetSystemLibrary::Conv_SoftObjPathToSoftObjRef(softPath);
+            SDK::UObject* loaded = SDK::UKismetSystemLibrary::LoadAsset_Blocking(softRef);
+
+            if (!loaded)
             {
-                if (outError) *outError = "failed to add UMediaSoundComponent";
+                if (outError) *outError = "asset not found/load failed";
                 return nullptr;
             }
 
-            SDK::UMediaSoundComponent* mediaSound = static_cast<SDK::UMediaSoundComponent*>(added);
-
-            SDK::USceneComponent* root = actor->K2_GetRootComponent();
-            if (!root)
+            if (!loaded->IsA(SDK::USoundBase::StaticClass()))
             {
-                if (outError) *outError = "target actor has no root component";
+                if (outError) *outError = std::string("asset is not USoundBase: ") + loaded->GetFullName();
                 return nullptr;
             }
 
-            const bool attached = mediaSound->K2_AttachToComponent(
-                root,
-                SDK::FName{},
-                SDK::EAttachmentRule::KeepRelative,
-                SDK::EAttachmentRule::KeepRelative,
-                SDK::EAttachmentRule::KeepRelative,
-                false);
-            if (!attached)
-            {
-                if (outError) *outError = "failed to attach media sound component to actor root";
-                return nullptr;
-            }
-
-            // Configure 3D spatialization and attenuation
-            mediaSound->bAllowSpatialization = true;
-            mediaSound->bIsUISound = false;
-            
-            // Enable attenuation override and configure spatial audio settings
-            mediaSound->bOverrideAttenuation = true;
-            auto& atten = mediaSound->AttenuationOverrides;
-            
-            // Zero out the struct first (important!)
-            memset(&atten, 0, sizeof(atten));
-            
-            // Enable core spatial features
-            atten.bAttenuate = true;
-            atten.bSpatialize = true;
-            atten.DistanceAlgorithm = SDK::EAttenuationDistanceModel::Linear;
-            atten.AttenuationShape = SDK::EAttenuationShape::Sphere;
-            
-            // Set distance attenuation: full volume up to 500 units, fade to -60dB by 5000 units
-            atten.FalloffDistance = 2000.0f;  // Max distance where sound is audible
-            atten.dBAttenuationAtMax = -60.0f; // Volume reduction at max distance
-            
-            // Optionally add low-pass filtering at distance for realism
-            atten.bAttenuateWithLPF = true;
-            atten.LPFRadiusMin = 100.0f;
-            atten.LPFRadiusMax = 2000.0f;
-            atten.LPFFrequencyAtMin = 20000.0f; // Full frequency at close range
-            atten.LPFFrequencyAtMax = 500.0f;   // Muffled at distance
-
-            mediaSound->Activate(true);
-
-            return mediaSound;
+            return static_cast<SDK::USoundBase*>(loaded);
         }
 
-        static SDK::UMediaSoundComponent* SpawnPlayerAnchoredMediaSoundComponent2D(std::string* outError)
-        {
-            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
-            if (!player)
-            {
-                if (outError) *outError = "player not found for 2D media audio sink";
-                return nullptr;
-            }
+    } // anonymous namespace
 
-            SDK::UMediaSoundComponent* mediaSound = SpawnAttachedMediaSoundComponent(player, outError);
-            if (!mediaSound)
-                return nullptr;
-
-            mediaSound->bAllowSpatialization = false;
-            mediaSound->bIsUISound = true;
-            return mediaSound;
-        }
-
-        static void RegisterActiveMedia(SDK::UMediaPlayer* player, SDK::UMediaSoundComponent* soundComponent, SDK::AActor* ownerActor, const std::string& descriptor, bool isAttached3D)
-        {
-            float now = 0.0f;
-            if (player)
-            {
-                now = SDK::UGameplayStatics::GetTimeSeconds(player);
-            }
-            std::lock_guard<std::mutex> lock(gMediaMutex);
-            ActiveMediaInstance inst;
-            inst.Player = player;
-            inst.SoundComponent = soundComponent;
-            inst.OwnerActor = ownerActor;
-            inst.Descriptor = descriptor;
-            inst.IsAttached3D = isAttached3D;
-            inst.StartTime = now;
-            gActiveMedia.push_back(inst);
-        }
-
-        static bool IsSupportedAudioExtension(const std::filesystem::path& path)
-        {
-            static const std::unordered_set<std::string> exts = {
-                ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".wma"
-            };
-
-            const std::string ext = ToLowerCopy(path.extension().string());
-            return exts.find(ext) != exts.end();
-        }
-
-        static std::string DeriveGroupName(const std::filesystem::path& path)
-        {
-            std::string stem = ToLowerCopy(path.stem().string());
-            if (stem.empty())
-                return "default";
-
-            const std::size_t dash = stem.find('-');
-            if (dash != std::string::npos && dash > 0)
-            {
-                return stem.substr(0, dash);
-            }
-
-            while (!stem.empty())
-            {
-                const unsigned char ch = static_cast<unsigned char>(stem.back());
-                if (std::isdigit(ch) || stem.back() == '_' || stem.back() == '-')
-                {
-                    stem.pop_back();
-                    continue;
-                }
-                break;
-            }
-
-            if (stem.empty())
-                return "default";
-            return stem;
-        }
-
-        static bool IsSuppressedWorldNameLower(const std::string& lower)
-        {
-            // Hard ignore in these maps: showing subtitles during load/menu is unstable and unwanted.
-            return (lower.find("l_startup") != std::string::npos) || (lower.find("l_mainmenu") != std::string::npos);
-        }
-
-        static bool ShouldSuppressSubtitlesNow(std::string* outWorldName = nullptr)
-        {
-            SDK::UWorld* world = Mod::GameContext::GetWorld();
-            if (!world)
-            {
-                if (outWorldName) *outWorldName = "<null>";
-                return true;
-            }
-
-            std::string name = world->GetName();
-            if (outWorldName) *outWorldName = name;
-
-            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-            return IsSuppressedWorldNameLower(name);
-        }
-
-        static void EnqueuePending(const std::wstring& text, float seconds, const SDK::FLinearColor& color)
-        {
-            std::lock_guard<std::mutex> lock(gPendingMutex);
-            if (gPending.size() >= 32)
-                gPending.pop_front();
-            gPending.push_back(PendingMessage{text, seconds, color});
-        }
-
-        static uint64_t NowTickMs()
-        {
-            return static_cast<uint64_t>(GetTickCount64());
-        }
-
-        static std::wstring RepeatChar(wchar_t ch, size_t count)
-        {
-            std::wstring s;
-            s.assign(count, ch);
-            return s;
-        }
-
-        static void UpdateSubtitleTestSequence()
-        {
-            std::lock_guard<std::mutex> lock(gTestMutex);
-            if (!gTestActive)
-                return;
-
-            const uint64_t now = NowTickMs();
-            if (gTestNextTickMs != 0 && now < gTestNextTickMs)
-                return;
-
-            if (gTestIndex >= gTestItems.size())
-            {
-                gTestActive = false;
-                LOG_INFO("[ModFeedback] subtitle_test complete (" << gTestItems.size() << " cases)");
-                return;
-            }
-
-            // Emit exactly one per interval to keep the on-HMD result readable.
-            const SubtitleTestItem& item = gTestItems[gTestIndex++];
-            gTestNextTickMs = now + gTestIntervalMs;
-
-            // IMPORTANT: call the public API (so suppression/queueing still applies).
-            // We purposely keep the color parameter ignored for now.
-            // (This is testing the game's ShowSubtitles behavior, not our alternate channels.)
-            // NOLINTNEXTLINE(readability-suspicious-call-argument)
-            ShowMessage(item.Text.c_str(), item.Seconds, SDK::FLinearColor{0.8f, 0.9f, 1.0f, 1.0f});
-        }
-    }
+    // =====================================================================
+    // Subtitle / message display (unchanged)
+    // =====================================================================
 
     void ShowMessage(const wchar_t* text, float seconds, const SDK::FLinearColor& color)
     {
-        (void)color; // CRUFT NOTE: legacy multi-channel paths used color; ShowSubtitles doesn't.
+        (void)color;
 
         if (!text || !*text)
             return;
 
-        // During Startup/MainMenu, we avoid spamming subtitles; queue for later instead.
         std::string worldName;
         if (ShouldSuppressSubtitlesNow(&worldName))
         {
@@ -664,7 +553,6 @@ namespace Mod::ModFeedback
             return;
         }
 
-        // Defensive: never attempt to send gameplay/UI events to the CDO.
         if (player->IsDefaultObject())
         {
             static int cdoLogs = 0;
@@ -677,7 +565,6 @@ namespace Mod::ModFeedback
             return;
         }
 
-        // Force-enable subtitles so the mod can always communicate.
         if (!SDK::UGameplayStatics::AreSubtitlesEnabled())
         {
             SDK::UGameplayStatics::SetSubtitlesEnabled(true);
@@ -690,16 +577,12 @@ namespace Mod::ModFeedback
         if (duration > 20.0f)
             duration = 20.0f;
 
-        // Avoid passing temporary/unstable buffers into the SDK (UC::FString is non-owning).
         std::wstring msgW(text);
-
-        // Defensive cap: we don't know the engine's max length here; keep it bounded
-        // so telnet commands can't accidentally allocate/format multi-kilobyte UI strings.
         constexpr size_t kMaxChars = 1024;
         if (msgW.size() > kMaxChars)
         {
             msgW.resize(kMaxChars);
-            msgW.append(L"…");
+            msgW.append(L"\u2026");
         }
 
         SDK::FText msgText;
@@ -708,13 +591,11 @@ namespace Mod::ModFeedback
             msgText = SDK::UKismetTextLibrary::Conv_StringToText(stable);
         }
 
-        // This is the call path seen in trace logs right before the headset-visible notification:
-        // Function BP_RadiusPlayerCharacter_Gameplay_C.ShowSubtitles
         static int showLogs = 0;
         if (showLogs < 200)
         {
             ++showLogs;
-            LOG_INFO("[ModFeedback] ShowSubtitles(System) player='" << player->GetFullName() << "' dur=" << duration << " chars=" << (int)msgW.size() << " text='" << SDK::FString(msgW.c_str()).ToString() << "'");
+            LOG_INFO("[ModFeedback] ShowSubtitles(System) player='" << player->GetFullName() << "' dur=" << duration << " chars=" << (int)msgW.size());
         }
 
         player->ShowSubtitles(SDK::ESubtitleInstigator::System, msgText, duration);
@@ -727,29 +608,19 @@ namespace Mod::ModFeedback
         gTestItems.clear();
         gTestItems.reserve(24);
 
-        // Purpose: explore what breaks (length, newlines, markup tokens) using the same
-        // ShowSubtitles path the game uses for safety/no-mag feedback.
         gTestItems.push_back({L"[subtitle_test] baseline", 2.5f});
         gTestItems.push_back({L"[subtitle_test] newline\nsecond line", 3.0f});
         gTestItems.push_back({L"[subtitle_test] two newlines\nline2\nline3", 3.5f});
-
-        // Markup-like tokens (the game seems to use <b> and {BTN_*} style placeholders).
         gTestItems.push_back({L"[subtitle_test] markup: <b>bold?</b>", 3.0f});
         gTestItems.push_back({L"[subtitle_test] token: {BTN_Top} {BTN_Bottom}", 3.0f});
         gTestItems.push_back({L"[subtitle_test] combined: <b>{BTN_Top}</b> to toggle", 3.5f});
-
-        // Length ramps (single-line)
         gTestItems.push_back({L"[subtitle_test] len=32 " + RepeatChar(L'A', 32), 3.0f});
         gTestItems.push_back({L"[subtitle_test] len=64 " + RepeatChar(L'B', 64), 3.0f});
         gTestItems.push_back({L"[subtitle_test] len=128 " + RepeatChar(L'C', 128), 3.0f});
         gTestItems.push_back({L"[subtitle_test] len=256 " + RepeatChar(L'D', 256), 3.5f});
         gTestItems.push_back({L"[subtitle_test] len=512 " + RepeatChar(L'E', 512), 4.0f});
-
-        // Unicode probes
-        gTestItems.push_back({L"[subtitle_test] unicode: ✓ Ω Ж \u4E2D", 3.5f});
+        gTestItems.push_back({L"[subtitle_test] unicode: \u2713 \u03A9 \u0416 \u4E2D", 3.5f});
         gTestItems.push_back({L"[subtitle_test] unicode long: " + RepeatChar(L'\u4E2D', 120), 3.5f});
-
-        // Very long (will be capped in ShowMessage)
         gTestItems.push_back({L"[subtitle_test] very long (cap expected): " + RepeatChar(L'X', 2000), 4.0f});
 
         gTestIntervalMs = (intervalMs < 200 ? 200 : intervalMs);
@@ -770,275 +641,19 @@ namespace Mod::ModFeedback
         LOG_INFO("[ModFeedback] subtitle_test stopped");
     }
 
-    // =========================================================================
-    // WAV-based 3D spatial audio (USoundWave + SpawnSoundAttached)
-    // UMediaPlayer can't move/spatialiase properly; WAV file -> raw PCM into
-    // USoundWave -> SpawnSoundAttached gives true 3D follow audio.
-    //
-    // Layout reference (UE 5.5, confirmed by dump offsets):
-    //   USoundBase::duration     0x0100 float (EditConst, set via cast)
-    //   USoundBase::TotalSamples 0x0108 float (EditConst, set via cast)
-    //   USoundWave::NumChannels  0x036C int32  (public)
-    //   USoundWave::SampleRate   0x0370 int32  (Protected, set via cast)
-    //   USoundWave::Pad_3A0[0]   0x03A0 uint8* RawPCMData  (native non-UPROPERTY)
-    //   USoundWave::Pad_3A0[8]   0x03A8 uint32 RawPCMDataSize (native non-UPROPERTY)
-    //   These are the first two members of the native block right after
-    //   InternalCurves (last UPROPERTY, ends at 0x03A0).
-    // =========================================================================
-
-    struct ParsedWav
-    {
-        std::vector<uint8_t> pcmData;
-        uint16_t numChannels = 0;
-        uint32_t sampleRate  = 0;
-    };
-
-    static bool ParseWavFile(const std::string& path, ParsedWav& out, std::string* outErr)
-    {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f) { if (outErr) *outErr = "cannot open wav: " + path; return false; }
-        const auto fileSize = static_cast<size_t>(f.tellg());
-        f.seekg(0);
-
-        if (fileSize < 12) { if (outErr) *outErr = "wav too small"; return false; }
-
-        char riff[4]; uint32_t riffSz; char wave[4];
-        f.read(riff, 4);
-        f.read(reinterpret_cast<char*>(&riffSz), 4);
-        f.read(wave, 4);
-        if (std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(wave, "WAVE", 4) != 0)
-        {
-            if (outErr) *outErr = "not a RIFF/WAVE file";
-            return false;
-        }
-
-        uint16_t numChannels = 0, bitsPerSample = 0;
-        uint32_t sampleRate = 0;
-        bool hasFmt = false;
-
-        // Scan chunks — handles LIST/INFO and other chunks between fmt and data
-        while (f.good() && static_cast<size_t>(f.tellg()) + 8 <= fileSize)
-        {
-            char id[4]; uint32_t chunkSz;
-            f.read(id, 4);
-            f.read(reinterpret_cast<char*>(&chunkSz), 4);
-            if (!f) break;
-            const auto chunkStart = f.tellg();
-
-            if (std::memcmp(id, "fmt ", 4) == 0)
-            {
-                uint16_t audioFmt;
-                f.read(reinterpret_cast<char*>(&audioFmt), 2);
-                if (audioFmt != 1) { if (outErr) *outErr = "wav audioFormat != 1 (not PCM)"; return false; }
-                f.read(reinterpret_cast<char*>(&numChannels), 2);
-                f.read(reinterpret_cast<char*>(&sampleRate), 4);
-                f.seekg(6, std::ios::cur); // skip byteRate (4) + blockAlign (2)
-                f.read(reinterpret_cast<char*>(&bitsPerSample), 2);
-                if (bitsPerSample != 16) { if (outErr) *outErr = "wav bitsPerSample != 16"; return false; }
-                hasFmt = true;
-            }
-            else if (std::memcmp(id, "data", 4) == 0)
-            {
-                if (!hasFmt) { if (outErr) *outErr = "data chunk before fmt chunk"; return false; }
-                out.pcmData.resize(chunkSz);
-                f.read(reinterpret_cast<char*>(out.pcmData.data()), chunkSz);
-                if (!f) { if (outErr) *outErr = "truncated data chunk"; return false; }
-                out.numChannels = numChannels;
-                out.sampleRate  = sampleRate;
-                return true;
-            }
-
-            // Skip to next chunk (pad to even size)
-            const auto next = static_cast<std::streampos>(static_cast<size_t>(chunkStart) + chunkSz + (chunkSz & 1));
-            f.seekg(next);
-        }
-
-        if (outErr) *outErr = "no data chunk found in wav";
-        return false;
-    }
-
-    // Native offsets of non-UPROPERTY fields in USoundWave (UE 5.5 layout)
-    static constexpr ptrdiff_t kSoundWaveRawPCMDataOffset     = 0x03A0; // uint8*
-    static constexpr ptrdiff_t kSoundWaveRawPCMDataSizeOffset = 0x03A8; // uint32
-    static constexpr ptrdiff_t kSoundWaveSampleRateOffset     = 0x0370; // int32 (protected)
-    static constexpr ptrdiff_t kSoundBaseDurationOffset       = 0x0100; // float (EditConst)
-    static constexpr ptrdiff_t kSoundBaseTotalSamplesOffset   = 0x0108; // float (EditConst)
-
-    static SDK::USoundAttenuation* CreateSpatialAttenuation3D()
-    {
-        SDK::UObject* outer = Mod::GameContext::GetWorldContext();
-        if (!outer) return nullptr;
-        SDK::UObject* spawned = SDK::UGameplayStatics::SpawnObject(SDK::USoundAttenuation::StaticClass(), outer);
-        if (!spawned || !spawned->IsA(SDK::USoundAttenuation::StaticClass())) return nullptr;
-        auto* att = static_cast<SDK::USoundAttenuation*>(spawned);
-
-        // FBaseAttenuationSettings: sphere with inner radius and falloff distance
-        att->Attenuation.AttenuationShapeExtents = SDK::FVector{Mod::Tuning::kFriendAmbientInnerRadius, 0.0f, 0.0f};
-        att->Attenuation.FalloffDistance         = Mod::Tuning::kFriendAmbientAttenuationRadius - Mod::Tuning::kFriendAmbientInnerRadius;
-        att->Attenuation.dBAttenuationAtMax      = -60.0f;
-
-        // FSoundAttenuationSettings flags at offset 0x00C0 within the struct
-        att->Attenuation.bAttenuate       = 1;
-        att->Attenuation.bSpatialize      = 1;
-        att->Attenuation.bAttenuateWithLPF = 1;
-        att->Attenuation.LPFRadiusMin     = Mod::Tuning::kFriendAmbientLpfStartRadius;
-        att->Attenuation.LPFRadiusMax     = Mod::Tuning::kFriendAmbientAttenuationRadius;
-
-        return att;
-    }
-
-    // Load a 16-bit PCM wav file into a fresh USoundWave UObject.
-    // The returned object is owned by the engine's GC; the PCM heap buffer is
-    // tracked in ActiveWavInstance and freed after the audio component finishes.
-    static SDK::USoundWave* LoadWavAsSoundWave(const ParsedWav& wav, bool loop, std::string* outErr)
-    {
-        SDK::UObject* outer = Mod::GameContext::GetWorldContext();
-        if (!outer) { if (outErr) *outErr = "world context null"; return nullptr; }
-
-        SDK::UObject* spawned = SDK::UGameplayStatics::SpawnObject(SDK::USoundWave::StaticClass(), outer);
-        if (!spawned || !spawned->IsA(SDK::USoundWave::StaticClass()))
-        {
-            if (outErr) *outErr = "failed to spawn USoundWave";
-            return nullptr;
-        }
-        auto* sw = static_cast<SDK::USoundWave*>(spawned);
-
-        // --- Set reflected UPROPERTY fields ---
-        sw->NumChannels = static_cast<int32_t>(wav.numChannels);
-        sw->bLooping    = loop ? 1 : 0;
-
-        // Protected / EditConst fields written via offset
-        const float totalSamples = static_cast<float>(wav.pcmData.size() / (wav.numChannels * 2u));
-        const float duration     = totalSamples / static_cast<float>(wav.sampleRate);
-        auto* base = reinterpret_cast<uint8_t*>(sw);
-        *reinterpret_cast<int32_t*>(base + kSoundWaveSampleRateOffset)    = static_cast<int32_t>(wav.sampleRate);
-        *reinterpret_cast<float*>  (base + kSoundBaseDurationOffset)      = duration;
-        *reinterpret_cast<float*>  (base + kSoundBaseTotalSamplesOffset)   = totalSamples;
-
-        // --- Write native PCM pointer and size ---
-        const uint32_t pcmSize = static_cast<uint32_t>(wav.pcmData.size());
-        uint8_t* heapPcm = new uint8_t[pcmSize];
-        std::memcpy(heapPcm, wav.pcmData.data(), pcmSize);
-
-        *reinterpret_cast<uint8_t**>(base + kSoundWaveRawPCMDataOffset)     = heapPcm;
-        *reinterpret_cast<uint32_t*>(base + kSoundWaveRawPCMDataSizeOffset) = pcmSize;
-
-        return sw;
-    }
-
-    void CleanupStaleWav()
-    {
-        std::lock_guard<std::mutex> lock(gWavMutex);
-        int cleaned = 0;
-        gActiveWav.erase(std::remove_if(gActiveWav.begin(), gActiveWav.end(),
-            [&cleaned](ActiveWavInstance& inst)
-            {
-                // Actor gone?
-                if (inst.OwnerActor && !SDK::UKismetSystemLibrary::IsValid(inst.OwnerActor))
-                {
-                    if (inst.AudioComp && SDK::UKismetSystemLibrary::IsValid(inst.AudioComp))
-                    {
-                        inst.AudioComp->Stop();
-                        inst.AudioComp->K2_DestroyComponent(inst.AudioComp);
-                    }
-                    delete[] inst.PcmBuffer;
-                    inst.PcmBuffer = nullptr;
-                    ++cleaned;
-                    return true;
-                }
-                // Audio component invalid or done playing?
-                if (!inst.AudioComp || !SDK::UKismetSystemLibrary::IsValid(inst.AudioComp))
-                {
-                    delete[] inst.PcmBuffer;
-                    inst.PcmBuffer = nullptr;
-                    ++cleaned;
-                    return true;
-                }
-                if (!inst.AudioComp->IsPlaying())
-                {
-                    inst.AudioComp->K2_DestroyComponent(inst.AudioComp);
-                    delete[] inst.PcmBuffer;
-                    inst.PcmBuffer = nullptr;
-                    ++cleaned;
-                    return true;
-                }
-                return false;
-            }
-        ), gActiveWav.end());
-
-        if (cleaned > 0)
-            LOG_INFO("[ModFeedback] CleanupStaleWav: freed " << cleaned << " wav instance(s)");
-    }
-
-    void CleanupStaleMedia()
-    {
-        std::lock_guard<std::mutex> lock(gMediaMutex);
-        int cleaned = 0;
-        gActiveMedia.erase(std::remove_if(gActiveMedia.begin(), gActiveMedia.end(),
-            [&cleaned](const ActiveMediaInstance& inst)
-            {
-                // Check if the media player is invalid or finished
-                if (!inst.Player || !SDK::UKismetSystemLibrary::IsValid(inst.Player))
-                {
-                    ++cleaned;
-                    return true;
-                }
-                
-                // Check if the owner actor (for 3D attached audio) became invalid
-                if (inst.IsAttached3D && inst.OwnerActor && !SDK::UKismetSystemLibrary::IsValid(inst.OwnerActor))
-                {
-                    LOG_INFO("[ModFeedback] CleanupStaleMedia: actor invalid, stopping media (" << inst.Descriptor << ")");
-                    inst.Player->Close();
-                    if (inst.SoundComponent && SDK::UKismetSystemLibrary::IsValid(inst.SoundComponent))
-                    {
-                        inst.SoundComponent->Deactivate();
-                        inst.SoundComponent->K2_DestroyComponent(inst.SoundComponent);
-                    }
-                    ++cleaned;
-                    return true;
-                }
-                
-                // Do not aggressively clean media that just started; allow time to prepare/play.
-                float nowTime = SDK::UGameplayStatics::GetTimeSeconds(inst.Player);
-                if (nowTime - inst.StartTime < Mod::Tuning::kMediaStaleCleanupDelaySeconds)
-                {
-                    return false;
-                }
-
-                // Check if media finished playing naturally or failed to ever start (not ready).
-                if (!inst.Player->IsPlaying() && !inst.Player->IsPreparing() && !inst.Player->IsReady())
-                {
-                    if (inst.SoundComponent && SDK::UKismetSystemLibrary::IsValid(inst.SoundComponent))
-                    {
-                        inst.SoundComponent->Deactivate();
-                        inst.SoundComponent->K2_DestroyComponent(inst.SoundComponent);
-                    }
-                    ++cleaned;
-                    return true;
-                }
-                
-                return false;
-            }
-        ), gActiveMedia.end());
-        
-        if (cleaned > 0)
-        {
-            LOG_INFO("[ModFeedback] CleanupStaleMedia: cleaned " << cleaned << " media instance(s)");
-        }
-    }
+    // =====================================================================
+    // DrainPending – called every tick from ModMain
+    // =====================================================================
 
     void DrainPending()
     {
-        // Avoid recursion if draining triggers more feedback.
         bool expected = false;
         if (!gDraining.compare_exchange_strong(expected, true))
             return;
 
-        // Clean up stale media instances periodically
-        CleanupStaleMedia();
-        CleanupStaleWav();
+        // Update 3D sound positions and clean up stale entries
+        UpdateTrackedActorPositions();
 
-        // Only drain once we're out of suppressed maps.
         if (ShouldSuppressSubtitlesNow())
         {
             gDraining.store(false);
@@ -1051,8 +666,6 @@ namespace Mod::ModFeedback
             if (gPending.empty())
             {
                 gDraining.store(false);
-                // Still advance the staggered subtitle test sequence even when there are
-                // no suppressed pending messages to drain.
                 UpdateSubtitleTestSequence();
                 return;
             }
@@ -1062,13 +675,11 @@ namespace Mod::ModFeedback
         int drained = 0;
         for (const auto& m : local)
         {
-            // Emit using the normal path (now that we're in a safe world).
             ShowMessage(m.Text.c_str(), m.Seconds, m.Color);
             if (++drained >= 8)
-                break; // don't spam on the first tick after load
+                break;
         }
 
-        // If we didn't drain all, put the rest back.
         if ((int)local.size() > drained)
         {
             std::lock_guard<std::mutex> lock(gPendingMutex);
@@ -1081,10 +692,12 @@ namespace Mod::ModFeedback
         }
 
         gDraining.store(false);
-
-        // Also drive any staggered subtitle test sequence.
         UpdateSubtitleTestSequence();
     }
+
+    // =====================================================================
+    // World text (debug)
+    // =====================================================================
 
     void ShowWorldText(const SDK::FVector& location, const wchar_t* text, float seconds, const SDK::FLinearColor& color)
     {
@@ -1099,6 +712,10 @@ namespace Mod::ModFeedback
         SDK::UKismetSystemLibrary::DrawDebugString(ctx, location, msg, nullptr, color, seconds);
         LOG_INFO("[ModFeedback] Shown world text: " << msg.ToString());
     }
+
+    // =====================================================================
+    // UE-native sound asset playback (game built-in sounds, unchanged)
+    // =====================================================================
 
     void PlaySound2D(SDK::USoundBase* sound, float volume, float pitch, bool isUiSound)
     {
@@ -1133,7 +750,7 @@ namespace Mod::ModFeedback
         if (!ctx)
             return;
 
-        SDK::UGameplayStatics::PlaySoundAtLocation(ctx, sound, location, SDK::FRotator{0.0, 0.0, 0.0}, volume, pitch, 0.0f, nullptr, nullptr, nullptr, nullptr);
+        SDK::UGameplayStatics::PlaySoundAtLocation(ctx, sound, location, SDK::FRotator{0.0f, 0.0f, 0.0f}, volume, pitch, 0.0f, nullptr, nullptr, nullptr, nullptr);
     }
 
     bool PlaySoundAsset2D(const std::string& softObjectPath, float volume, float pitch, bool isUiSound, std::string* outError)
@@ -1146,7 +763,6 @@ namespace Mod::ModFeedback
             LOG_WARN("[ModFeedback] PlaySoundAsset2D failed for path '" << softObjectPath << "': " << err);
             return false;
         }
-
         PlaySound2D(sound, volume, pitch, isUiSound);
         return true;
     }
@@ -1174,58 +790,39 @@ namespace Mod::ModFeedback
         return true;
     }
 
+    // =====================================================================
+    // Media/WAV playback – now routed through SpatialAudio
+    // =====================================================================
+
     bool PlayMediaFile2D(const std::string& filePath, bool loop, float volume, std::string* outError)
     {
+        // Only .wav files are supported by SpatialAudio. Non-wav files won't work.
+        std::string ext = ToLowerCopy(std::filesystem::path(filePath).extension().string());
+        if (ext != ".wav")
+        {
+            if (outError) *outError = "only .wav files supported (got " + ext + "); UE audio has been removed";
+            LOG_WARN("[ModFeedback] PlayMediaFile2D: non-wav file unsupported: " << filePath);
+            return false;
+        }
+
         std::string err;
-        SDK::UMediaPlayer* player = SpawnMediaPlayer(&err);
-        if (!player)
+        SpatialAudio::SoundHandle handle = SpatialAudio::Play2D(filePath, volume, loop, &err);
+        if (handle == SpatialAudio::kInvalidHandle)
         {
             if (outError) *outError = err;
             return false;
         }
 
-        SDK::UMediaSoundComponent* mediaSound = SpawnPlayerAnchoredMediaSoundComponent2D(&err);
-        if (!mediaSound)
-        {
-            if (outError) *outError = err;
-            LOG_ERROR("[ModFeedback] media_file 2D sink creation failed for '" << filePath << "': " << err);
-            return false;
-        }
-        mediaSound->SetMediaPlayer(player);
-
-        const bool opened = player->OpenFile(SDK::FString(ToWide(filePath).c_str()));
-        if (!PlayMediaCommonOpenResult(player, opened, loop, volume, std::string("file: ") + filePath, outError))
-            return false;
-
-        RegisterActiveMedia(player, mediaSound, nullptr, std::string("2d file: ") + filePath, false);
+        LOG_INFO("[ModFeedback] PlayMediaFile2D ok: " << filePath << " handle=" << handle);
         return true;
     }
 
     bool PlayMediaUrl2D(const std::string& url, bool loop, float volume, std::string* outError)
     {
-        std::string err;
-        SDK::UMediaPlayer* player = SpawnMediaPlayer(&err);
-        if (!player)
-        {
-            if (outError) *outError = err;
-            return false;
-        }
-
-        SDK::UMediaSoundComponent* mediaSound = SpawnPlayerAnchoredMediaSoundComponent2D(&err);
-        if (!mediaSound)
-        {
-            if (outError) *outError = err;
-            LOG_ERROR("[ModFeedback] media_url 2D sink creation failed for '" << url << "': " << err);
-            return false;
-        }
-        mediaSound->SetMediaPlayer(player);
-
-        const bool opened = player->OpenUrl(SDK::FString(ToWide(url).c_str()));
-        if (!PlayMediaCommonOpenResult(player, opened, loop, volume, std::string("url: ") + url, outError))
-            return false;
-
-        RegisterActiveMedia(player, mediaSound, nullptr, std::string("2d url: ") + url, false);
-        return true;
+        // URL streaming is no longer supported without UMediaPlayer.
+        if (outError) *outError = "URL streaming not supported (UE audio removed); use local .wav files";
+        LOG_WARN("[ModFeedback] PlayMediaUrl2D: URL playback not supported: " << url);
+        return false;
     }
 
     bool PlayMediaFileAttached3D(const std::string& actorSelector, const std::string& filePath, bool loop, float volume, std::string* outResolvedActor, std::string* outError)
@@ -1239,117 +836,38 @@ namespace Mod::ModFeedback
             return false;
         }
 
-        SDK::UMediaPlayer* player = SpawnMediaPlayer(&err);
-        if (!player)
-        {
-            if (outError) *outError = err;
-            return false;
-        }
-
-        SDK::UMediaSoundComponent* mediaSound = SpawnAttachedMediaSoundComponent(actor, &err);
-        if (!mediaSound)
-        {
-            if (outError) *outError = err;
-            return false;
-        }
-
-        mediaSound->SetMediaPlayer(player);
-        if (volume < 0.0f) volume = 0.0f;
-        if (volume > 4.0f) volume = 4.0f;
-
-        const bool opened = player->OpenFile(SDK::FString(ToWide(filePath).c_str()));
-        if (!PlayMediaCommonOpenResult(player, opened, loop, volume, std::string("file3d: ") + filePath + " -> " + resolvedName, outError))
+        if (!PlayWavSpatial3D(actor, filePath, loop, volume, outError))
             return false;
 
-        RegisterActiveMedia(player, mediaSound, actor, std::string("3d file: ") + filePath + " -> " + resolvedName, true);
         if (outResolvedActor) *outResolvedActor = resolvedName;
         return true;
     }
 
     bool PlayMediaUrlAttached3D(const std::string& actorSelector, const std::string& url, bool loop, float volume, std::string* outResolvedActor, std::string* outError)
     {
-        std::string resolvedName;
-        std::string err;
-        SDK::AActor* actor = ResolveActorSelector(actorSelector, &resolvedName, &err);
-        if (!actor)
-        {
-            if (outError) *outError = err;
-            return false;
-        }
-
-        SDK::UMediaPlayer* player = SpawnMediaPlayer(&err);
-        if (!player)
-        {
-            if (outError) *outError = err;
-            return false;
-        }
-
-        SDK::UMediaSoundComponent* mediaSound = SpawnAttachedMediaSoundComponent(actor, &err);
-        if (!mediaSound)
-        {
-            if (outError) *outError = err;
-            return false;
-        }
-
-        mediaSound->SetMediaPlayer(player);
-        if (volume < 0.0f) volume = 0.0f;
-        if (volume > 4.0f) volume = 4.0f;
-
-        const bool opened = player->OpenUrl(SDK::FString(ToWide(url).c_str()));
-        if (!PlayMediaCommonOpenResult(player, opened, loop, volume, std::string("url3d: ") + url + " -> " + resolvedName, outError))
-            return false;
-
-        RegisterActiveMedia(player, mediaSound, actor, std::string("3d url: ") + url + " -> " + resolvedName, true);
-        if (outResolvedActor) *outResolvedActor = resolvedName;
-        return true;
+        if (outError) *outError = "URL streaming not supported (UE audio removed); use local .wav files";
+        LOG_WARN("[ModFeedback] PlayMediaUrlAttached3D: URL playback not supported: " << url);
+        return false;
     }
 
     int StopAllMedia()
     {
-        std::lock_guard<std::mutex> lock(gMediaMutex);
-        int stopped = 0;
-        for (const ActiveMediaInstance& instance : gActiveMedia)
-        {
-            if (instance.Player && SDK::UKismetSystemLibrary::IsValid(instance.Player))
-            {
-                instance.Player->Close();
-                ++stopped;
-            }
-
-            if (instance.SoundComponent && SDK::UKismetSystemLibrary::IsValid(instance.SoundComponent))
-            {
-                instance.SoundComponent->Deactivate();
-                instance.SoundComponent->K2_DestroyComponent(instance.SoundComponent);
-            }
-        }
-        gActiveMedia.clear();
-        return stopped;
+        SpatialAudio::StopAll();
+        std::lock_guard<std::mutex> lock(gTrackedMutex);
+        int count = static_cast<int>(gTrackedSounds.size());
+        gTrackedSounds.clear();
+        LOG_INFO("[ModFeedback] StopAllMedia: cleared " << count << " tracked entries");
+        return count;
     }
 
     std::string DescribeActiveMedia(std::size_t maxEntries)
     {
-        std::lock_guard<std::mutex> lock(gMediaMutex);
-        std::ostringstream oss;
-        oss << "Active media: " << gActiveMedia.size();
-
-        std::size_t shown = 0;
-        for (const ActiveMediaInstance& instance : gActiveMedia)
-        {
-            if (shown++ >= maxEntries)
-            {
-                oss << "\n  ...";
-                break;
-            }
-
-            const bool validPlayer = (instance.Player && SDK::UKismetSystemLibrary::IsValid(instance.Player));
-            oss << "\n  [" << shown << "] "
-                << (instance.IsAttached3D ? "3D" : "2D")
-                << " " << (validPlayer ? "playing" : "invalid")
-                << " :: " << instance.Descriptor;
-        }
-
-        return oss.str();
+        return SpatialAudio::DescribeActive(maxEntries);
     }
+
+    // =====================================================================
+    // Sound group system (scanning unchanged)
+    // =====================================================================
 
     bool ScanSoundGroupsFromFolder(const std::string& folderPath, std::string* outError)
     {
@@ -1367,8 +885,6 @@ namespace Mod::ModFeedback
             return false;
         }
 
-        // discovered accumulates entries from both audio files and .txt files.
-        // Groups are cumulative: spotted-man1.wav + spotted.txt both end up in group 'spotted'.
         std::unordered_map<std::string, std::vector<std::string>> discovered;
         int txtFilesRead = 0;
         int txtEntriesAdded = 0;
@@ -1385,8 +901,6 @@ namespace Mod::ModFeedback
 
             if (extLower == ".txt")
             {
-                // Each non-empty, non-comment line is a file path or URL.
-                // The group name comes from the .txt file's stem (same DeriveGroupName logic).
                 const std::string group = DeriveGroupName(fp);
                 std::ifstream tf(fp);
                 if (!tf.is_open()) continue;
@@ -1410,7 +924,6 @@ namespace Mod::ModFeedback
             }
         }
 
-        // Sort each group's entries for determinism.
         for (auto& entry : discovered)
         {
             std::sort(entry.second.begin(), entry.second.end());
@@ -1420,8 +933,6 @@ namespace Mod::ModFeedback
         int newEntries = 0;
         {
             std::lock_guard<std::mutex> lock(gSoundGroupMutex);
-            // Merge cumulatively into existing gSoundGroups so calling scan twice
-            // (or scanning multiple folders) accumulates rather than replaces entries.
             for (auto& kv : discovered)
             {
                 auto& target = gSoundGroups[kv.first];
@@ -1457,15 +968,10 @@ namespace Mod::ModFeedback
             source = gSoundGroupsSourceFolder;
             groups.reserve(gSoundGroups.size());
             for (const auto& kv : gSoundGroups)
-            {
                 groups.push_back(kv);
-            }
         }
 
-        std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b)
-        {
-            return a.first < b.first;
-        });
+        std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
         std::ostringstream oss;
         oss << "Sound groups: " << groups.size();
@@ -1484,8 +990,7 @@ namespace Mod::ModFeedback
             oss << "\n  " << kv.first << " (" << kv.second.size() << "): ";
             for (std::size_t i = 0; i < kv.second.size() && i < maxEntriesPerGroup; ++i)
             {
-                if (i > 0)
-                    oss << ", ";
+                if (i > 0) oss << ", ";
                 oss << std::filesystem::path(kv.second[i]).filename().string();
             }
 
@@ -1505,7 +1010,6 @@ namespace Mod::ModFeedback
             return false;
         }
 
-        // Copy the group entries under lock so we can iterate without holding the lock during playback.
         std::vector<std::string> entries;
         {
             std::lock_guard<std::mutex> lock(gSoundGroupMutex);
@@ -1518,7 +1022,6 @@ namespace Mod::ModFeedback
             entries = it->second;
         }
 
-        // Shuffle to get random order for retry.
         std::shuffle(entries.begin(), entries.end(), gSoundGroupRng);
 
         const int maxRetries = (std::min)(Mod::Tuning::kSoundGroupRetryCount, (int)entries.size());
@@ -1527,11 +1030,15 @@ namespace Mod::ModFeedback
         {
             const std::string& entry = entries[attempt];
             std::string err;
-            // Discern URL vs file path for correct playback method.
-            const bool ok = IsUrl(entry)
-                ? PlayMediaUrl2D(entry, loop, volume, &err)
-                : PlayMediaFile2D(entry, loop, volume, &err);
 
+            // URLs no longer supported; only local .wav files
+            if (IsUrl(entry))
+            {
+                lastErr = "URL playback not supported";
+                continue;
+            }
+
+            const bool ok = PlayMediaFile2D(entry, loop, volume, &err);
             if (ok)
             {
                 if (outChosenFile) *outChosenFile = entry;
@@ -1546,94 +1053,48 @@ namespace Mod::ModFeedback
         }
 
         if (outError) *outError = "all " + std::to_string(maxRetries) + " attempts failed; last: " + lastErr;
-        LOG_ERROR("[ModFeedback] PlayRandomSoundGroup2D exhausted retries (group='" << groupKey << "')");
         return false;
     }
 
-    // ---------------------------------------------------------------------------
-    // Actor-attached media helpers (actor pointer variants, no string selector)
-    // ---------------------------------------------------------------------------
+    // =====================================================================
+    // Actor-attached playback (routes through SpatialAudio)
+    // =====================================================================
 
     bool PlayMediaFileAttachedToActor(SDK::AActor* actor, const std::string& filePath, bool loop, float volume, std::string* outError)
     {
-        if (!actor)
-        {
-            if (outError) *outError = "actor is null";
-            return false;
-        }
-        std::string err;
-        SDK::UMediaPlayer* player = SpawnMediaPlayer(&err);
-        if (!player) { if (outError) *outError = err; return false; }
-
-        SDK::UMediaSoundComponent* mediaSound = SpawnAttachedMediaSoundComponent(actor, &err);
-        if (!mediaSound) { if (outError) *outError = err; return false; }
-
-        mediaSound->SetMediaPlayer(player);
-        if (volume < 0.0f) volume = 0.0f;
-        if (volume > 4.0f) volume = 4.0f;
-
-        const bool opened = player->OpenFile(SDK::FString(ToWide(filePath).c_str()));
-        if (!PlayMediaCommonOpenResult(player, opened, loop, volume, std::string("file3d@actor: ") + filePath, outError))
-            return false;
-
-        RegisterActiveMedia(player, mediaSound, actor, std::string("3d file@actor: ") + filePath, true);
-        return true;
+        return PlayWavSpatial3D(actor, filePath, loop, volume, outError);
     }
 
     bool PlayMediaUrlAttachedToActor(SDK::AActor* actor, const std::string& url, bool loop, float volume, std::string* outError)
     {
+        if (outError) *outError = "URL streaming not supported (UE audio removed); use local .wav files";
+        LOG_WARN("[ModFeedback] PlayMediaUrlAttachedToActor: URL playback not supported: " << url);
+        return false;
+    }
+
+    bool PlayWavAttachedToActor(SDK::AActor* actor, const std::string& filePath, bool loop, float volume, std::string* outError)
+    {
+        return PlayWavSpatial3D(actor, filePath, loop, volume, outError);
+    }
+
+    bool PlaySoundAssetAttachedToActor(SDK::AActor* actor, const std::string& softObjectPath, float volume, std::string* outError)
+    {
+        // This uses a UE game-asset sound (e.g. MetaSoundSource). Still goes through
+        // UE's SpawnSoundAttached since it's a game-native asset, not a custom wav.
         if (!actor)
         {
             if (outError) *outError = "actor is null";
             return false;
         }
-        std::string err;
-        SDK::UMediaPlayer* player = SpawnMediaPlayer(&err);
-        if (!player) { if (outError) *outError = err; return false; }
-
-        SDK::UMediaSoundComponent* mediaSound = SpawnAttachedMediaSoundComponent(actor, &err);
-        if (!mediaSound) { if (outError) *outError = err; return false; }
-
-        mediaSound->SetMediaPlayer(player);
-        if (volume < 0.0f) volume = 0.0f;
-        if (volume > 4.0f) volume = 4.0f;
-
-        const bool opened = player->OpenUrl(SDK::FString(ToWide(url).c_str()));
-        if (!PlayMediaCommonOpenResult(player, opened, loop, volume, std::string("url3d@actor: ") + url, outError))
-            return false;
-
-        RegisterActiveMedia(player, mediaSound, actor, std::string("3d url@actor: ") + url, true);
-        return true;
-    }
-
-    // Play a 16-bit PCM .wav file attached to a moving actor for true 3D spatial audio.
-    // Uses SpawnSoundAttached (not UMediaPlayer) so the sound follows the actor in 3D space.
-    bool PlayWavAttachedToActor(SDK::AActor* actor, const std::string& filePath, bool loop, float volume, std::string* outError)
-    {
-        if (!actor) { if (outError) *outError = "actor is null"; return false; }
 
         std::string err;
-        ParsedWav wav;
-        if (!ParseWavFile(filePath, wav, &err))
+        SDK::USoundBase* sound = LoadSoundAssetBySoftPath(softObjectPath, &err);
+        if (!sound)
         {
             if (outError) *outError = err;
-            LOG_ERROR("[ModFeedback] PlayWavAttachedToActor ParseWavFile failed: " << err);
+            LOG_WARN("[ModFeedback] PlaySoundAssetAttachedToActor failed for path '" << softObjectPath << "': " << err);
             return false;
         }
-
-        SDK::USoundWave* sw = LoadWavAsSoundWave(wav, loop, &err);
-        if (!sw)
-        {
-            if (outError) *outError = err;
-            LOG_ERROR("[ModFeedback] PlayWavAttachedToActor LoadWavAsSoundWave failed: " << err);
-            return false;
-        }
-
-        SDK::USoundAttenuation* att = CreateSpatialAttenuation3D();
-        // att may be null; SpawnSoundAttached accepts null attenuation (falls back to asset attenuation)
-
-        if (volume < 0.0f) volume = 0.0f;
-        if (volume > 4.0f) volume = 4.0f;
 
         SDK::USceneComponent* root = actor->K2_GetRootComponent();
         if (!root)
@@ -1642,63 +1103,59 @@ namespace Mod::ModFeedback
             return false;
         }
 
+        if (volume < 0.0f) volume = 0.0f;
+        if (volume > 4.0f) volume = 4.0f;
+
         SDK::UAudioComponent* audComp = SDK::UGameplayStatics::SpawnSoundAttached(
-            sw,
-            root,
+            sound, root,
             SDK::FName{},
             SDK::FVector{0.0f, 0.0f, 0.0f},
             SDK::FRotator{0.0f, 0.0f, 0.0f},
             SDK::EAttachLocation::KeepRelativeOffset,
-            false,   // bStopWhenAttachedToDestroyed
-            volume,
-            1.0f,    // pitch
-            0.0f,    // start time
-            att,
-            nullptr, // no concurrency
-            !loop    // bAutoDestroy when non-looping
-        );
+            false, volume, 1.0f, 0.0f,
+            nullptr, nullptr, true);
 
         if (!audComp)
         {
             if (outError) *outError = "SpawnSoundAttached returned null";
-            LOG_ERROR("[ModFeedback] PlayWavAttachedToActor SpawnSoundAttached failed for: " << filePath);
             return false;
         }
 
-        // Retrieve the heap buffer we put into sw so we can free it after playback
-        uint8_t* pcmBuf = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(sw) + kSoundWaveRawPCMDataOffset);
-
-        {
-            std::lock_guard<std::mutex> lock(gWavMutex);
-            gActiveWav.push_back({audComp, actor, pcmBuf, filePath});
-        }
-
-        LOG_INFO("[ModFeedback] PlayWavAttachedToActor ok (" << filePath << ", loop=" << loop
-            << ", vol=" << volume << ", ch=" << wav.numChannels
-            << ", sr=" << wav.sampleRate << ")");
+        LOG_INFO("[ModFeedback] PlaySoundAssetAttachedToActor ok ('" << softObjectPath
+            << "', actor=" << actor->GetName() << ", vol=" << volume << ")");
         return true;
     }
+
+    bool PlayWavAttachedToPlayerWithTemplate(const std::string& /*templateSoftObjectPath*/, const std::string& filePath, bool loop, float volume, std::string* outError)
+    {
+        // Template-based USoundWave playback is no longer needed with our own audio engine.
+        // Route through 2D playback as a simple fallback.
+        return PlayMediaFile2D(filePath, loop, volume, outError);
+    }
+
+    std::string DescribeLoadedSoundWaves(std::size_t /*maxEntries*/, const std::string& /*containsFilter*/, bool /*includeDefaultObjects*/)
+    {
+        return "USoundWave discovery removed (SpatialAudio engine in use)";
+    }
+
+    bool PlayWavAttachedToPlayerAutoTemplate(const std::string& filePath, bool loop, float volume, const std::string& /*containsFilter*/, std::string* /*outTemplateName*/, std::string* outError)
+    {
+        return PlayMediaFile2D(filePath, loop, volume, outError);
+    }
+
+    // =====================================================================
+    // Actor query helpers
+    // =====================================================================
 
     bool IsMediaPlayingForActor(SDK::AActor* actor)
     {
         if (!actor) return false;
+
+        std::lock_guard<std::mutex> lock(gTrackedMutex);
+        for (const auto& t : gTrackedSounds)
         {
-            std::lock_guard<std::mutex> lock(gMediaMutex);
-            for (const auto& inst : gActiveMedia)
-            {
-                if (inst.OwnerActor != actor) continue;
-                if (inst.Player && SDK::UKismetSystemLibrary::IsValid(inst.Player) && inst.Player->IsPlaying())
-                    return true;
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(gWavMutex);
-            for (const auto& inst : gActiveWav)
-            {
-                if (inst.OwnerActor != actor) continue;
-                if (inst.AudioComp && SDK::UKismetSystemLibrary::IsValid(inst.AudioComp) && inst.AudioComp->IsPlaying())
-                    return true;
-            }
+            if (t.actor == actor && SpatialAudio::IsPlaying(t.handle))
+                return true;
         }
         return false;
     }
@@ -1707,44 +1164,19 @@ namespace Mod::ModFeedback
     {
         if (!actor) return 0;
         int stopped = 0;
-        {
-            std::lock_guard<std::mutex> lock(gMediaMutex);
-            gActiveMedia.erase(std::remove_if(gActiveMedia.begin(), gActiveMedia.end(),
-                [actor, &stopped](const ActiveMediaInstance& inst)
+
+        std::lock_guard<std::mutex> lock(gTrackedMutex);
+        gTrackedSounds.erase(
+            std::remove_if(gTrackedSounds.begin(), gTrackedSounds.end(),
+                [actor, &stopped](const TrackedActorSound& t)
                 {
-                    if (inst.OwnerActor != actor) return false;
-                    if (inst.Player && SDK::UKismetSystemLibrary::IsValid(inst.Player))
-                    {
-                        inst.Player->Close();
-                        ++stopped;
-                    }
-                    if (inst.SoundComponent && SDK::UKismetSystemLibrary::IsValid(inst.SoundComponent))
-                    {
-                        inst.SoundComponent->Deactivate();
-                        inst.SoundComponent->K2_DestroyComponent(inst.SoundComponent);
-                    }
+                    if (t.actor != actor) return false;
+                    SpatialAudio::Stop(t.handle);
+                    ++stopped;
                     return true;
-                }
-            ), gActiveMedia.end());
-        }
-        {
-            std::lock_guard<std::mutex> lock(gWavMutex);
-            gActiveWav.erase(std::remove_if(gActiveWav.begin(), gActiveWav.end(),
-                [actor, &stopped](ActiveWavInstance& inst)
-                {
-                    if (inst.OwnerActor != actor) return false;
-                    if (inst.AudioComp && SDK::UKismetSystemLibrary::IsValid(inst.AudioComp))
-                    {
-                        inst.AudioComp->Stop();
-                        inst.AudioComp->K2_DestroyComponent(inst.AudioComp);
-                        ++stopped;
-                    }
-                    delete[] inst.PcmBuffer;
-                    inst.PcmBuffer = nullptr;
-                    return true;
-                }
-            ), gActiveWav.end());
-        }
+                }),
+            gTrackedSounds.end());
+
         return stopped;
     }
 
@@ -1783,18 +1215,24 @@ namespace Mod::ModFeedback
         {
             const std::string& entry = entries[attempt];
             std::string err;
-            // .wav files use SpawnSoundAttached for true 3D spatial audio;
-            // URLs and other file types fall through to the UMediaPlayer path.
-            const bool isWav = !IsUrl(entry) && entry.size() >= 4
-                && (entry.compare(entry.size() - 4, 4, ".wav") == 0
-                 || entry.compare(entry.size() - 4, 4, ".WAV") == 0);
-            const bool ok = isWav
-                ? PlayWavAttachedToActor(actor, entry, loop, volume, &err)
-                : (IsUrl(entry)
-                    ? PlayMediaUrlAttachedToActor(actor, entry, loop, volume, &err)
-                    : PlayMediaFileAttachedToActor(actor, entry, loop, volume, &err));
 
-            if (ok)
+            if (IsUrl(entry))
+            {
+                lastErr = "URL playback not supported";
+                LOG_WARN("[ModFeedback] PlayRandomSoundGroupAttachedToActor: skipping URL entry '" << entry << "'");
+                continue;
+            }
+
+            // Only .wav files supported
+            std::string ext = ToLowerCopy(std::filesystem::path(entry).extension().string());
+            if (ext != ".wav")
+            {
+                lastErr = "only .wav files supported (got " + ext + ")";
+                LOG_WARN("[ModFeedback] PlayRandomSoundGroupAttachedToActor: skipping non-wav entry '" << entry << "'");
+                continue;
+            }
+
+            if (PlayWavSpatial3D(actor, entry, loop, volume, &err))
             {
                 if (outChosenEntry) *outChosenEntry = entry;
                 LOG_INFO("[ModFeedback] PlayRandomSoundGroupAttachedToActor ok (group='" << groupKey
@@ -1808,22 +1246,36 @@ namespace Mod::ModFeedback
         }
 
         if (outError) *outError = "all " + std::to_string(maxRetries) + " attempts failed; last: " + lastErr;
-        LOG_ERROR("[ModFeedback] PlayRandomSoundGroupAttachedToActor exhausted retries (group='" << groupKey << "')");
         return false;
     }
 
+    // =====================================================================
+    // Init
+    // =====================================================================
+
     void InitSoundSystem()
     {
+        // Initialize the SpatialAudio engine
+        std::string err;
+        if (!SpatialAudio::Initialize(&err))
+        {
+            LOG_ERROR("[ModFeedback] SpatialAudio initialization failed: " << err);
+        }
+        else
+        {
+            LOG_INFO("[ModFeedback] SpatialAudio initialized successfully");
+        }
+
         const std::filesystem::path soundsFolder = std::filesystem::current_path() / Mod::Tuning::kDefaultSoundsFolder;
         std::error_code ec;
         const bool exists = std::filesystem::exists(soundsFolder, ec) && std::filesystem::is_directory(soundsFolder, ec);
         if (exists)
         {
             LOG_INFO("[ModFeedback] Default sounds folder found: " << soundsFolder.string() << " -- scanning...");
-            std::string err;
-            if (!ScanSoundGroupsFromFolder(soundsFolder.string(), &err))
+            std::string scanErr;
+            if (!ScanSoundGroupsFromFolder(soundsFolder.string(), &scanErr))
             {
-                LOG_WARN("[ModFeedback] Sounds folder scan failed: " << err);
+                LOG_WARN("[ModFeedback] Sounds folder scan failed: " << scanErr);
             }
         }
         else

@@ -80,6 +80,21 @@ namespace Mod::ModFeedback
     // Uses SpawnSoundAttached (not UMediaPlayer) so attenuation and 3D positioning work correctly.
     bool PlayWavAttachedToActor(SDK::AActor* actor, const std::string& filePath, bool loop, float volume, std::string* outError = nullptr);
 
+    // Play an existing game sound asset (e.g. MetaSoundSource) attached to a moving actor.
+    // Used to verify SpawnSoundAttached 3D spatialization works with proper sound assets.
+    bool PlaySoundAssetAttachedToActor(SDK::AActor* actor, const std::string& softObjectPath, float volume = 1.0f, std::string* outError = nullptr);
+
+    // Diagnostic A/B variant: create a runtime WAV soundwave using a known-good template USoundWave's
+    // playback configuration (loading behavior/group/volume/pitch), then attach and play at local player.
+    bool PlayWavAttachedToPlayerWithTemplate(const std::string& templateSoftObjectPath, const std::string& filePath, bool loop, float volume, std::string* outError = nullptr);
+
+    // Discover currently loaded USoundWave assets from GObjects and return a compact summary.
+    std::string DescribeLoadedSoundWaves(std::size_t maxEntries = 20, const std::string& containsFilter = std::string(), bool includeDefaultObjects = false);
+
+    // No-soft-path diagnostic variant: auto-select a loaded USoundWave template from GObjects,
+    // apply its playback config to a runtime WAV soundwave, and play attached to local player.
+    bool PlayWavAttachedToPlayerAutoTemplate(const std::string& filePath, bool loop, float volume, const std::string& containsFilter = std::string(), std::string* outTemplateName = nullptr, std::string* outError = nullptr);
+
     // Pick a random sound from a group and play it as 3D audio attached to the given actor.
     // Discerns file vs URL. Retries on failure. Outputs the chosen entry path/url.
     bool PlayRandomSoundGroupAttachedToActor(SDK::AActor* actor, const std::string& groupName, bool loop, float volume, std::string* outChosenEntry = nullptr, std::string* outError = nullptr);

@@ -506,6 +506,15 @@ namespace Mod::Friend
         return false;
     }
 
+    SDK::AActor* FriendSubsystem::GetFirstFriendActor() const
+    {
+        std::lock_guard<std::mutex> lock(friendsMutex_);
+        for (const auto& e : friends_)
+            if (!e.cleanedUp && !e.IsDead && e.Actor && SDK::UKismetSystemLibrary::IsValid(e.Actor))
+                return e.Actor;
+        return nullptr;
+    }
+
     // -------------------------------------------------------------------------
     // Per-entry tick behaviours
     // -------------------------------------------------------------------------

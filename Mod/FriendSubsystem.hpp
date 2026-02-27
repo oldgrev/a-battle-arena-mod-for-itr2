@@ -81,6 +81,9 @@ namespace Mod::Friend
         // Returns true if actor is a tracked, non-cleaned-up friend NPC.
         bool IsFriendActor(SDK::AActor* actor) const;
 
+        // Returns the first friend's actor pointer (or nullptr if none).
+        SDK::AActor* GetFirstFriendActor() const;
+
     private:
         // Returns a jittered version of a base interval (±kFriendJitterFraction).
         float JitteredInterval(float base) const;

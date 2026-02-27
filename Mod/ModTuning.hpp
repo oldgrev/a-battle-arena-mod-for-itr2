@@ -143,13 +143,44 @@ namespace Mod::Tuning
     inline constexpr int   kSoundGroupRetryCount = 3;               // retries when a sound fails to play
     inline constexpr const char* kFriendAmbientSoundGroup = "ambient";    // group for periodic idle sounds
 
-    // WAV 3D attenuation (used when playing .wav files via SpawnSoundAttached)
-    inline constexpr float kFriendAmbientInnerRadius      = 300.0f;  // full-volume sphere radius (cm)
-    inline constexpr float kFriendAmbientAttenuationRadius = 5000.0f; // distance at which sound is inaudible
-    inline constexpr float kFriendAmbientLpfStartRadius   = 1000.0f; // distance at which LPF starts rolling off
+    // -------------------------------------------------------------------------
+    // SpatialAudio – 3D positional audio engine (waveOut)
+    // -------------------------------------------------------------------------
 
-    // Cleanup delay to avoid removing media instances that are still preparing/loading
-    inline constexpr float kMediaStaleCleanupDelaySeconds = 0.5f;    // seconds
+    // Distance model (all distances in Unreal units, i.e. cm)
+    inline constexpr float kSpatialInnerRadius      = 300.0f;   // full-volume sphere radius
+    inline constexpr float kSpatialOuterRadius      = 5000.0f;  // inaudible beyond this
+
+    // Low-pass filter distance thresholds
+    inline constexpr float kSpatialLpfStartRadius   = 1000.0f;  // LPF starts rolling off here
+    inline constexpr float kSpatialLpfEndRadius     = 5000.0f;  // LPF fully applied here
+
+    // LPF coefficient range: 1.0 = passthrough, lower = more muffled.
+    // One-pole IIR:  y[n] = alpha * x[n] + (1-alpha) * y[n-1]
+    inline constexpr float kSpatialLpfAlphaMin      = 0.05f;    // at kSpatialLpfEndRadius
+    inline constexpr float kSpatialLpfAlphaMax      = 1.0f;     // at kSpatialLpfStartRadius
+
+    // Master output gain applied after all per-source mixing.
+    // Increase this if playback is too quiet.  1.0 = no boost.
+    // The constant-power pan law inherently attenuates centred sources by ~3 dB;
+    // a value of 3.0-4.0 compensates for that and brings levels up.
+    inline constexpr float kSpatialOutputGain       = 3.0f;
+
+    // Position update rate (Hz).  10 = recompute spatial params every ~100ms.
+    inline constexpr float kSpatialPositionUpdateHz = 10.0f;
+
+    // waveOut buffer configuration
+    inline constexpr int   kSpatialOutputSampleRate   = 48000;
+    inline constexpr int   kSpatialOutputChannels     = 2;      // stereo
+    inline constexpr int   kSpatialOutputBitsPerSample = 16;
+    inline constexpr int   kSpatialBufferCount        = 4;      // ring buffer count
+    inline constexpr int   kSpatialBufferDurationMs   = 40;     // ms per buffer
+
+    // Legacy aliases so existing code (FriendSubsystem etc.) still compiles
+    inline constexpr float kFriendAmbientInnerRadius      = kSpatialInnerRadius;
+    inline constexpr float kFriendAmbientAttenuationRadius = kSpatialOuterRadius;
+    inline constexpr float kFriendAmbientLpfStartRadius   = kSpatialLpfStartRadius;
+
     inline constexpr const char* kFriendEnemySpottedSoundGroup = "enemyspotted";
     inline constexpr const char* kFriendTragedySoundGroup = "tragedy";
 }

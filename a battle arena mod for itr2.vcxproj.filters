@@ -69,6 +69,12 @@
     <ClInclude Include="CppSDK\SDK.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="Mod\FriendSubsystem.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\SpatialAudio.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -96,6 +102,9 @@
       <Filter>Source Files\Mod</Filter>
     </ClCompile>
     <ClCompile Include="Mod\ModFeedback.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\SpatialAudio.cpp">
       <Filter>Source Files\Mod</Filter>
     </ClCompile>
     <ClCompile Include="Mod\ModMain.cpp">
@@ -128,10 +137,16 @@
     <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp">
       <Filter>Source Files\SDK</Filter>
     </ClCompile>
-    <ClCompile Include="Mod\LoadoutSubsystem.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="CppSDK\SDK\MediaAssets_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\FriendSubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\LoadoutSubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\AudioMixer_functions.cpp">
       <Filter>Source Files\SDK</Filter>
     </ClCompile>
   </ItemGroup>

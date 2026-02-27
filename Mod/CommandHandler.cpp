@@ -311,6 +311,115 @@ namespace Mod
             return "sound3d ok: " + path;
         });
 
+        Register("soundasset_friend", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: soundasset_friend <SoftObjectPath> [volume]\n"
+                       "Tests SpawnSoundAttached with existing game MetaSoundSource attached to friend NPC.\n"
+                       "Example: soundasset_friend /Game/Audio/A_MS_WP_Fort17_Fire.A_MS_WP_Fort17_Fire 1.0";
+
+            const std::string path = args[0];
+            float volume = 1.0f;
+
+            if (args.size() >= 2)
+            {
+                try { volume = std::stof(args[1]); }
+                catch (...) { return "Invalid volume: " + args[1]; }
+            }
+
+            // Get the first friend actor to attach to
+            auto* friendSub = Mod::Friend::FriendSubsystem::Get();
+            if (!friendSub)
+                return "soundasset_friend failed: FriendSubsystem not available";
+
+            SDK::AActor* friendActor = friendSub->GetFirstFriendActor();
+            if (!friendActor)
+                return "soundasset_friend failed: No friend NPC found. Spawn one first (e.g. spawn_friend)";
+
+            std::string err;
+            if (!Mod::ModFeedback::PlaySoundAssetAttachedToActor(friendActor, path, volume, &err))
+                return "soundasset_friend failed: " + err;
+
+            std::string actorName = friendActor->GetName();
+            return "soundasset_friend ok: " + path + " attached to " + actorName;
+        });
+
+        Register("wav3d_tpl", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world;
+            if (args.size() < 2)
+                return "Usage: wav3d_tpl <TemplateSoftObjectPath> <WavFilePath> [loop:0|1] [volume]";
+
+            const std::string templatePath = args[0];
+            const std::string wavPath = args[1];
+            bool loop = false;
+            float volume = 1.0f;
+
+            if (args.size() >= 3)
+                loop = ParseBoolArg(args[2], false);
+            if (args.size() >= 4)
+            {
+                try { volume = std::stof(args[3]); }
+                catch (...) { return "Invalid volume: " + args[3]; }
+            }
+
+            std::string err;
+            if (!Mod::ModFeedback::PlayWavAttachedToPlayerWithTemplate(templatePath, wavPath, loop, volume, &err))
+                return "wav3d_tpl failed: " + err;
+
+            return "wav3d_tpl ok: template=" + templatePath + " wav=" + wavPath;
+        });
+
+        Register("soundwaves", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world;
+            std::size_t maxEntries = 20;
+            std::string containsFilter;
+            bool includeDefaults = false;
+
+            if (args.size() >= 1)
+            {
+                try { maxEntries = static_cast<std::size_t>(std::stoul(args[0])); }
+                catch (...) { return "Invalid maxEntries: " + args[0]; }
+            }
+            if (args.size() >= 2)
+                containsFilter = args[1];
+            if (args.size() >= 3)
+                includeDefaults = ParseBoolArg(args[2], false);
+
+            return Mod::ModFeedback::DescribeLoadedSoundWaves(maxEntries, containsFilter, includeDefaults);
+        });
+
+        Register("wav3d_auto", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: wav3d_auto <WavFilePath> [loop:0|1] [volume] [containsFilter]";
+
+            const std::string wavPath = args[0];
+            bool loop = false;
+            float volume = 1.0f;
+            std::string containsFilter;
+
+            if (args.size() >= 2)
+                loop = ParseBoolArg(args[1], false);
+            if (args.size() >= 3)
+            {
+                try { volume = std::stof(args[2]); }
+                catch (...) { return "Invalid volume: " + args[2]; }
+            }
+            if (args.size() >= 4)
+                containsFilter = args[3];
+
+            std::string picked;
+            std::string err;
+            if (!Mod::ModFeedback::PlayWavAttachedToPlayerAutoTemplate(wavPath, loop, volume, containsFilter, &picked, &err))
+                return "wav3d_auto failed: " + err;
+
+            return "wav3d_auto ok: template='" + picked + "' wav='" + wavPath + "'";
+        });
+
         Register("media_file", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
                  {
             (void)world;

@@ -149,6 +149,53 @@ namespace Mod::Arena
         return (float)((double)lo / (double)0xffffffffu);
     }
 
+    static bool IsMimicScoutActor(const SDK::AActor* actor)
+    {
+        if (!actor || !actor->Class)
+        {
+            return false;
+        }
+
+        const std::string classFullName = actor->Class->GetFullName();
+        if (classFullName.find("/Game/ITR2/BPs/AI/Enemies/Mimic/BP_RadiusNPCCharacterMimicScout.BP_RadiusNPCCharacterMimicScout_C") != std::string::npos)
+        {
+            return true;
+        }
+
+        const std::string className = actor->Class->GetName();
+        return className == "BP_RadiusNPCCharacterMimicScout_C";
+    }
+
+    static SDK::FVector ClampTargetMinDistance2D(
+        const SDK::FVector& playerLoc,
+        const SDK::FVector& npcLoc,
+        const SDK::FVector& target,
+        float minDistance)
+    {
+        SDK::FVector fromPlayer{};
+        fromPlayer.X = target.X - playerLoc.X;
+        fromPlayer.Y = target.Y - playerLoc.Y;
+        fromPlayer.Z = 0.0f;
+
+        const double minDistSq = (double)minDistance * (double)minDistance;
+        if (LenSq2D(fromPlayer) >= minDistSq)
+        {
+            return target;
+        }
+
+        SDK::FVector fallback{};
+        fallback.X = npcLoc.X - playerLoc.X;
+        fallback.Y = npcLoc.Y - playerLoc.Y;
+        fallback.Z = 0.0f;
+
+        const SDK::FVector dir = Normalize2D(fromPlayer, Normalize2D(fallback, SDK::FVector{1.0f, 0.0f, 0.0f}));
+
+        SDK::FVector out = target;
+        out.X = playerLoc.X + dir.X * minDistance;
+        out.Y = playerLoc.Y + dir.Y * minDistance;
+        return out;
+    }
+
     // Returns true if the location is likely visible in the player's current line-of-sight.
     // Heuristic:
     // 1) Must be in front of the player's view within a cone.
@@ -1289,6 +1336,10 @@ namespace Mod::Arena
                 // turn "std::max" into "std.(" and crash the parser.  Wrap the
                 // call in parentheses to suppress macro expansion.
                 float targetDistance = (std::max)(Mod::Tuning::kArenaTeleportMinDistanceFromPlayer, distance_ * Mod::Tuning::kArenaTeleportDistanceFactor);
+                if (IsMimicScoutActor(actor))
+                {
+                    targetDistance = (std::max)(targetDistance, Mod::Tuning::kArenaMimicScoutMinApproachDistance);
+                }
 
                 SDK::FVector newPos{};
                 bool foundNonVisible = false;
@@ -1472,6 +1523,7 @@ namespace Mod::Arena
             auto* actor = activeEnemies_[i];
             if (!actor || !actor->IsA(SDK::ARadiusAICharacterBase::StaticClass())) continue;
             auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(actor);
+            const bool isMimicScout = IsMimicScoutActor(actor);
 
             if (!aiChar->AIController)
             {
@@ -1558,6 +1610,17 @@ namespace Mod::Arena
                 // Mirror to the other side of the player.
                 target.X = playerLoc.X - (target.X - playerLoc.X);
                 target.Y = playerLoc.Y - (target.Y - playerLoc.Y);
+                (void)TryProjectToGround(world, player, target);
+            }
+
+            if (isMimicScout)
+            {
+                const SDK::FVector npcLoc = actor->K2_GetActorLocation();
+                target = ClampTargetMinDistance2D(
+                    playerLoc,
+                    npcLoc,
+                    target,
+                    Mod::Tuning::kArenaMimicScoutMinApproachDistance);
                 (void)TryProjectToGround(world, player, target);
             }
 

@@ -12,7 +12,7 @@ namespace Mod::Tuning
     // ---------------------------------------------------------------------
     // Arena
     // ---------------------------------------------------------------------
-    inline constexpr int   kArenaDefaultWaveSize = 100;
+    inline constexpr int   kArenaDefaultWaveSize = 30;
     inline constexpr float kArenaDefaultSpawnDistance = 10000.0f;
     inline constexpr float kArenaMinSpawnDistance = 8000.0f;
 
@@ -54,6 +54,7 @@ namespace Mod::Tuning
     inline constexpr float kArenaTeleportMinDistanceFromPlayer = 1000.0f;
     inline constexpr float kArenaTeleportDistanceFactor = 0.2f;
     inline constexpr float kArenaStuckMoveDistanceSq = 100.0f; // (10 units)^2
+    inline constexpr float kArenaMimicScoutMinApproachDistance = 2000.0f;
 
     // LoS avoidance tuning (spawn/teleport)
     inline constexpr float kArenaLoSVisibilityTraceEndZOffset = 80.0f;
@@ -83,16 +84,16 @@ namespace Mod::Tuning
     inline constexpr float kArenaNpcDelayToStartReduceDetectionScale = 0.0f;
     inline constexpr float kArenaNpcDetectReductionTime = 0.1f;
     inline constexpr float kArenaNpcSuspiciousActivityLevel = 1.0f;
-    inline constexpr float kArenaMoveToPlayerAcceptanceRadius = 100.0f;
+    inline constexpr float kArenaMoveToPlayerAcceptanceRadius = 1000.0f;
 
     // Pressure pathing patterns (used by the periodic "pressure" instruction)
     inline constexpr float kArenaPressureBehindPlayerDistance = 900.0f;
-    inline constexpr float kArenaPressureFlankOffset = 900.0f;
+    inline constexpr float kArenaPressureFlankOffset = 2000.0f;
     inline constexpr float kArenaPressureRingRadius = 1300.0f;
     inline constexpr float kArenaPressureLeapfrogFraction = 0.55f;
-    inline constexpr float kArenaPressureLeapfrogMinStep = 700.0f;
+    inline constexpr float kArenaPressureLeapfrogMinStep = 1000.0f;
     inline constexpr float kArenaPressureLeapfrogMaxStep = 2500.0f;
-    inline constexpr float kArenaPressureTargetJitterXY = 200.0f;
+    inline constexpr float kArenaPressureTargetJitterXY = 500.0f;
 
     // ---------------------------------------------------------------------
     // Cheats
@@ -117,16 +118,16 @@ namespace Mod::Tuning
     // ---------------------------------------------------------------------
     inline constexpr int   kFriendMaxCount = 3;                   // max simultaneous friend NPCs
     inline constexpr float kFriendFollowDistanceMax = 2000.0f;    // if friend is farther than this, move it
-    inline constexpr float kFriendFollowDistanceMin = 350.0f;     // target minimum distance from player
-    inline constexpr float kFriendFollowDistanceTarget = 600.0f;  // ideal distance from player when repositioning
-    inline constexpr float kFriendFollowAcceptanceRadius = 200.0f;
+    inline constexpr float kFriendFollowDistanceMin = 600.0f;     // target minimum distance from player
+    inline constexpr float kFriendFollowDistanceTarget = 1000.0f;  // ideal distance from player when repositioning
+    inline constexpr float kFriendFollowAcceptanceRadius = 1000.0f;
     // throttle how often a friend will be told to move when he's too far away.  Without this,
     // the NPC may receive movement commands every single tick while the player walks, which
     // shows up as repeated log lines and extra AI churn.
-    inline constexpr float kFriendFollowCooldownBase     = 10.0f;  // seconds; jittered ±kFriendJitterFraction
+    inline constexpr float kFriendFollowCooldownBase     = 20.0f;  // seconds; jittered ±kFriendJitterFraction
     inline constexpr float kFriendRepositionIntervalBase = 30.0f; // seconds; jittered ±50%
     inline constexpr float kFriendAmbientSoundIntervalBase = 30.0f;
-    inline constexpr float kFriendEnemySpotCheckIntervalBase = 10.0f; // how often we check for enemies
+    inline constexpr float kFriendEnemySpotCheckIntervalBase = 60.0f; // how often we check for enemies
     inline constexpr float kFriendEnemySpotChance = 0.60f;        // 60% chance per check when enemy in range
     inline constexpr float kFriendEnemySpotRangeUnits = 4000.0f;
     inline constexpr int   kFriendGroupId = 200;                  // separate from arena enemies (101)
@@ -148,12 +149,12 @@ namespace Mod::Tuning
     // -------------------------------------------------------------------------
 
     // Distance model (all distances in Unreal units, i.e. cm)
-    inline constexpr float kSpatialInnerRadius      = 300.0f;   // full-volume sphere radius
-    inline constexpr float kSpatialOuterRadius      = 5000.0f;  // inaudible beyond this
+    inline constexpr float kSpatialInnerRadius      = 1000.0f;   // full-volume sphere radius
+    inline constexpr float kSpatialOuterRadius      = 8000.0f;  // inaudible beyond this
 
     // Low-pass filter distance thresholds
-    inline constexpr float kSpatialLpfStartRadius   = 1000.0f;  // LPF starts rolling off here
-    inline constexpr float kSpatialLpfEndRadius     = 5000.0f;  // LPF fully applied here
+    inline constexpr float kSpatialLpfStartRadius   = 500.0f;  // LPF starts rolling off here
+    inline constexpr float kSpatialLpfEndRadius     = 8000.0f;  // LPF fully applied here
 
     // LPF coefficient range: 1.0 = passthrough, lower = more muffled.
     // One-pole IIR:  y[n] = alpha * x[n] + (1-alpha) * y[n-1]
@@ -164,7 +165,7 @@ namespace Mod::Tuning
     // Increase this if playback is too quiet.  1.0 = no boost.
     // The constant-power pan law inherently attenuates centred sources by ~3 dB;
     // a value of 3.0-4.0 compensates for that and brings levels up.
-    inline constexpr float kSpatialOutputGain       = 3.0f;
+    inline constexpr float kSpatialOutputGain       = 4.0f;
 
     // Position update rate (Hz).  10 = recompute spatial params every ~100ms.
     inline constexpr float kSpatialPositionUpdateHz = 10.0f;

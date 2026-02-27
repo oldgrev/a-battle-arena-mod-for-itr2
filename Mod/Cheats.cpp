@@ -259,25 +259,6 @@ namespace Mod
         return noClipActive_;
     }
 
-    void Cheats::ToggleJumpAllowed()
-    {
-        CheatSubsystem_t* cheatsub = GetCheatSubsystem();
-        if (!cheatsub)
-        {
-            LOG_WARN("[Cheats] ToggleJumpAllowed: cheat subsystem not available");
-            return;
-        }
-        bool oldVal = cheatsub->IsJumpAllowed();
-        cheatsub->SetJumpAllowed(!oldVal);
-        jumpAllowedActive_ = !oldVal;
-        Mod::ModFeedback::ShowMessage(jumpAllowedActive_ ? L"[Mod] Jump: ALLOWED" : L"[Mod] Jump: DISABLED", 2.0f);
-        LOG_INFO("[Cheats] JumpAllowed " << (jumpAllowedActive_ ? "enabled" : "disabled"));
-    }
-
-    bool Cheats::IsJumpAllowedActive() const
-    {
-        return jumpAllowedActive_;
-    }
 
     void Cheats::AddMoney(int amount)
     {
@@ -422,7 +403,6 @@ namespace Mod
         status << "  Fatigue Disabled: " << (fatigueDisabled_ ? "ACTIVE" : "inactive") << "\n";
         status << "  Bullet Time: " << (bulletTimeActive_ ? "ACTIVE" : "inactive") << " (Scale: " << bulletTimeScale_ << ")\n";
         status << "  NoClip: " << (noClipActive_ ? "ON" : "off") << "\n";
-        status << "  Jump Allowed: " << (jumpAllowedActive_ ? "ON" : "off") << "\n";
         status << "  Anomalies Disabled: " << (anomaliesDisabled_ ? "ACTIVE" : "inactive") << "\n";
         status << "  AutoMag: " << (autoMagActive_ ? "ACTIVE" : "inactive") << "\n";
         status << "  Debug Mode: " << (debugModeActive_ ? "ON" : "off");
@@ -439,7 +419,6 @@ namespace Mod
         if (fatigueDisabled_) ToggleFatigueDisabled();
         if (bulletTimeActive_) ToggleBulletTime();
         if (noClipActive_) ToggleNoClip();
-        if (jumpAllowedActive_) ToggleJumpAllowed();
         if (debugModeActive_) ToggleDebugMode();
         if (autoMagActive_) ToggleAutoMag();
         // Note: anomaliesDisabled_ is NOT toggled on level change -- it persists intentionally.

@@ -207,9 +207,9 @@ namespace Mod
             return GetHelp(); });
 
 
-        // Register list_npcs command
-        Register("list_npcs", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
-                 { return HandleListNPCs(world, args); });
+        // // Register list_npcs command
+        // Register("list_npcs", [this](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+        //          { return HandleListNPCs(world, args); });
 
         // Register cheat commands
         Register("god", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
@@ -254,350 +254,350 @@ namespace Mod
             Mod::ModFeedback::ShowMessage(L"[Mod] Cheats status requested", 2.0f, SDK::FLinearColor{0.8f, 0.8f, 0.8f, 1.0f});
             return g_Cheats.GetStatus(); });
 
-        Register("sound2d", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: sound2d <SoftObjectPath> [volume] [pitch] [ui:0|1]";
+        // Register("sound2d", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: sound2d <SoftObjectPath> [volume] [pitch] [ui:0|1]";
 
-            const std::string path = args[0];
-            float volume = 1.0f;
-            float pitch = 1.0f;
-            bool isUi = true;
+        //     const std::string path = args[0];
+        //     float volume = 1.0f;
+        //     float pitch = 1.0f;
+        //     bool isUi = true;
 
-            if (args.size() >= 2)
-            {
-                try { volume = std::stof(args[1]); } catch (...) { return "Invalid volume: " + args[1]; }
-            }
-            if (args.size() >= 3)
-            {
-                try { pitch = std::stof(args[2]); } catch (...) { return "Invalid pitch: " + args[2]; }
-            }
-            if (args.size() >= 4)
-            {
-                isUi = ParseBoolArg(args[3], true);
-            }
+        //     if (args.size() >= 2)
+        //     {
+        //         try { volume = std::stof(args[1]); } catch (...) { return "Invalid volume: " + args[1]; }
+        //     }
+        //     if (args.size() >= 3)
+        //     {
+        //         try { pitch = std::stof(args[2]); } catch (...) { return "Invalid pitch: " + args[2]; }
+        //     }
+        //     if (args.size() >= 4)
+        //     {
+        //         isUi = ParseBoolArg(args[3], true);
+        //     }
 
-            std::string err;
-            if (!Mod::ModFeedback::PlaySoundAsset2D(path, volume, pitch, isUi, &err))
-                return "sound2d failed: " + err + " (path=" + path + ")";
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlaySoundAsset2D(path, volume, pitch, isUi, &err))
+        //         return "sound2d failed: " + err + " (path=" + path + ")";
 
-            return "sound2d ok: " + path;
-        });
+        //     return "sound2d ok: " + path;
+        // });
 
-        Register("sound3d", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: sound3d <SoftObjectPath> [volume] [pitch]";
+        // Register("sound3d", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: sound3d <SoftObjectPath> [volume] [pitch]";
 
-            const std::string path = args[0];
-            float volume = 1.0f;
-            float pitch = 1.0f;
+        //     const std::string path = args[0];
+        //     float volume = 1.0f;
+        //     float pitch = 1.0f;
 
-            if (args.size() >= 2)
-            {
-                try { volume = std::stof(args[1]); } catch (...) { return "Invalid volume: " + args[1]; }
-            }
-            if (args.size() >= 3)
-            {
-                try { pitch = std::stof(args[2]); } catch (...) { return "Invalid pitch: " + args[2]; }
-            }
+        //     if (args.size() >= 2)
+        //     {
+        //         try { volume = std::stof(args[1]); } catch (...) { return "Invalid volume: " + args[1]; }
+        //     }
+        //     if (args.size() >= 3)
+        //     {
+        //         try { pitch = std::stof(args[2]); } catch (...) { return "Invalid pitch: " + args[2]; }
+        //     }
 
-            std::string err;
-            if (!Mod::ModFeedback::PlaySoundAsset3DAtPlayer(path, volume, pitch, &err))
-                return "sound3d failed: " + err + " (path=" + path + ")";
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlaySoundAsset3DAtPlayer(path, volume, pitch, &err))
+        //         return "sound3d failed: " + err + " (path=" + path + ")";
 
-            return "sound3d ok: " + path;
-        });
+        //     return "sound3d ok: " + path;
+        // });
 
-        Register("soundasset_friend", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: soundasset_friend <SoftObjectPath> [volume]\n"
-                       "Tests SpawnSoundAttached with existing game MetaSoundSource attached to friend NPC.\n"
-                       "Example: soundasset_friend /Game/Audio/A_MS_WP_Fort17_Fire.A_MS_WP_Fort17_Fire 1.0";
+        // Register("soundasset_friend", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: soundasset_friend <SoftObjectPath> [volume]\n"
+        //                "Tests SpawnSoundAttached with existing game MetaSoundSource attached to friend NPC.\n"
+        //                "Example: soundasset_friend /Game/Audio/A_MS_WP_Fort17_Fire.A_MS_WP_Fort17_Fire 1.0";
 
-            const std::string path = args[0];
-            float volume = 1.0f;
+        //     const std::string path = args[0];
+        //     float volume = 1.0f;
 
-            if (args.size() >= 2)
-            {
-                try { volume = std::stof(args[1]); }
-                catch (...) { return "Invalid volume: " + args[1]; }
-            }
+        //     if (args.size() >= 2)
+        //     {
+        //         try { volume = std::stof(args[1]); }
+        //         catch (...) { return "Invalid volume: " + args[1]; }
+        //     }
 
-            // Get the first friend actor to attach to
-            auto* friendSub = Mod::Friend::FriendSubsystem::Get();
-            if (!friendSub)
-                return "soundasset_friend failed: FriendSubsystem not available";
+        //     // Get the first friend actor to attach to
+        //     auto* friendSub = Mod::Friend::FriendSubsystem::Get();
+        //     if (!friendSub)
+        //         return "soundasset_friend failed: FriendSubsystem not available";
 
-            SDK::AActor* friendActor = friendSub->GetFirstFriendActor();
-            if (!friendActor)
-                return "soundasset_friend failed: No friend NPC found. Spawn one first (e.g. spawn_friend)";
+        //     SDK::AActor* friendActor = friendSub->GetFirstFriendActor();
+        //     if (!friendActor)
+        //         return "soundasset_friend failed: No friend NPC found. Spawn one first (e.g. spawn_friend)";
 
-            std::string err;
-            if (!Mod::ModFeedback::PlaySoundAssetAttachedToActor(friendActor, path, volume, &err))
-                return "soundasset_friend failed: " + err;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlaySoundAssetAttachedToActor(friendActor, path, volume, &err))
+        //         return "soundasset_friend failed: " + err;
 
-            std::string actorName = friendActor->GetName();
-            return "soundasset_friend ok: " + path + " attached to " + actorName;
-        });
+        //     std::string actorName = friendActor->GetName();
+        //     return "soundasset_friend ok: " + path + " attached to " + actorName;
+        // });
 
-        Register("wav3d_tpl", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.size() < 2)
-                return "Usage: wav3d_tpl <TemplateSoftObjectPath> <WavFilePath> [loop:0|1] [volume]";
+        // Register("wav3d_tpl", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.size() < 2)
+        //         return "Usage: wav3d_tpl <TemplateSoftObjectPath> <WavFilePath> [loop:0|1] [volume]";
 
-            const std::string templatePath = args[0];
-            const std::string wavPath = args[1];
-            bool loop = false;
-            float volume = 1.0f;
+        //     const std::string templatePath = args[0];
+        //     const std::string wavPath = args[1];
+        //     bool loop = false;
+        //     float volume = 1.0f;
 
-            if (args.size() >= 3)
-                loop = ParseBoolArg(args[2], false);
-            if (args.size() >= 4)
-            {
-                try { volume = std::stof(args[3]); }
-                catch (...) { return "Invalid volume: " + args[3]; }
-            }
+        //     if (args.size() >= 3)
+        //         loop = ParseBoolArg(args[2], false);
+        //     if (args.size() >= 4)
+        //     {
+        //         try { volume = std::stof(args[3]); }
+        //         catch (...) { return "Invalid volume: " + args[3]; }
+        //     }
 
-            std::string err;
-            if (!Mod::ModFeedback::PlayWavAttachedToPlayerWithTemplate(templatePath, wavPath, loop, volume, &err))
-                return "wav3d_tpl failed: " + err;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayWavAttachedToPlayerWithTemplate(templatePath, wavPath, loop, volume, &err))
+        //         return "wav3d_tpl failed: " + err;
 
-            return "wav3d_tpl ok: template=" + templatePath + " wav=" + wavPath;
-        });
+        //     return "wav3d_tpl ok: template=" + templatePath + " wav=" + wavPath;
+        // });
 
-        Register("soundwaves", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            std::size_t maxEntries = 20;
-            std::string containsFilter;
-            bool includeDefaults = false;
+        // Register("soundwaves", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     std::size_t maxEntries = 20;
+        //     std::string containsFilter;
+        //     bool includeDefaults = false;
 
-            if (args.size() >= 1)
-            {
-                try { maxEntries = static_cast<std::size_t>(std::stoul(args[0])); }
-                catch (...) { return "Invalid maxEntries: " + args[0]; }
-            }
-            if (args.size() >= 2)
-                containsFilter = args[1];
-            if (args.size() >= 3)
-                includeDefaults = ParseBoolArg(args[2], false);
+        //     if (args.size() >= 1)
+        //     {
+        //         try { maxEntries = static_cast<std::size_t>(std::stoul(args[0])); }
+        //         catch (...) { return "Invalid maxEntries: " + args[0]; }
+        //     }
+        //     if (args.size() >= 2)
+        //         containsFilter = args[1];
+        //     if (args.size() >= 3)
+        //         includeDefaults = ParseBoolArg(args[2], false);
 
-            return Mod::ModFeedback::DescribeLoadedSoundWaves(maxEntries, containsFilter, includeDefaults);
-        });
+        //     return Mod::ModFeedback::DescribeLoadedSoundWaves(maxEntries, containsFilter, includeDefaults);
+        // });
 
-        Register("wav3d_auto", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: wav3d_auto <WavFilePath> [loop:0|1] [volume] [containsFilter]";
+        // Register("wav3d_auto", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: wav3d_auto <WavFilePath> [loop:0|1] [volume] [containsFilter]";
 
-            const std::string wavPath = args[0];
-            bool loop = false;
-            float volume = 1.0f;
-            std::string containsFilter;
+        //     const std::string wavPath = args[0];
+        //     bool loop = false;
+        //     float volume = 1.0f;
+        //     std::string containsFilter;
 
-            if (args.size() >= 2)
-                loop = ParseBoolArg(args[1], false);
-            if (args.size() >= 3)
-            {
-                try { volume = std::stof(args[2]); }
-                catch (...) { return "Invalid volume: " + args[2]; }
-            }
-            if (args.size() >= 4)
-                containsFilter = args[3];
+        //     if (args.size() >= 2)
+        //         loop = ParseBoolArg(args[1], false);
+        //     if (args.size() >= 3)
+        //     {
+        //         try { volume = std::stof(args[2]); }
+        //         catch (...) { return "Invalid volume: " + args[2]; }
+        //     }
+        //     if (args.size() >= 4)
+        //         containsFilter = args[3];
 
-            std::string picked;
-            std::string err;
-            if (!Mod::ModFeedback::PlayWavAttachedToPlayerAutoTemplate(wavPath, loop, volume, containsFilter, &picked, &err))
-                return "wav3d_auto failed: " + err;
+        //     std::string picked;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayWavAttachedToPlayerAutoTemplate(wavPath, loop, volume, containsFilter, &picked, &err))
+        //         return "wav3d_auto failed: " + err;
 
-            return "wav3d_auto ok: template='" + picked + "' wav='" + wavPath + "'";
-        });
+        //     return "wav3d_auto ok: template='" + picked + "' wav='" + wavPath + "'";
+        // });
 
-        Register("media_file", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: media_file <FilePath> [loop:0|1] [volume]";
+        // Register("media_file", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: media_file <FilePath> [loop:0|1] [volume]";
 
-            const std::string filePath = args[0];
-            bool loop = false;
-            float volume = 1.0f;
+        //     const std::string filePath = args[0];
+        //     bool loop = false;
+        //     float volume = 1.0f;
 
-            if (args.size() >= 2)
-                loop = ParseBoolArg(args[1], false);
-            if (args.size() >= 3)
-            {
-                try { volume = std::stof(args[2]); } catch (...) { return "Invalid volume: " + args[2]; }
-            }
+        //     if (args.size() >= 2)
+        //         loop = ParseBoolArg(args[1], false);
+        //     if (args.size() >= 3)
+        //     {
+        //         try { volume = std::stof(args[2]); } catch (...) { return "Invalid volume: " + args[2]; }
+        //     }
 
-            std::string err;
-            if (!Mod::ModFeedback::PlayMediaFile2D(filePath, loop, volume, &err))
-                return "media_file failed: " + err + " (file=" + filePath + ")";
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayMediaFile2D(filePath, loop, volume, &err))
+        //         return "media_file failed: " + err + " (file=" + filePath + ")";
 
-            return "media_file ok: " + filePath;
-        });
+        //     return "media_file ok: " + filePath;
+        // });
 
-        Register("media_url", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: media_url <Url> [loop:0|1] [volume]";
+        // Register("media_url", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: media_url <Url> [loop:0|1] [volume]";
 
-            const std::string url = args[0];
-            bool loop = false;
-            float volume = 1.0f;
+        //     const std::string url = args[0];
+        //     bool loop = false;
+        //     float volume = 1.0f;
 
-            if (args.size() >= 2)
-                loop = ParseBoolArg(args[1], false);
-            if (args.size() >= 3)
-            {
-                try { volume = std::stof(args[2]); } catch (...) { return "Invalid volume: " + args[2]; }
-            }
+        //     if (args.size() >= 2)
+        //         loop = ParseBoolArg(args[1], false);
+        //     if (args.size() >= 3)
+        //     {
+        //         try { volume = std::stof(args[2]); } catch (...) { return "Invalid volume: " + args[2]; }
+        //     }
 
-            std::string err;
-            if (!Mod::ModFeedback::PlayMediaUrl2D(url, loop, volume, &err))
-                return "media_url failed: " + err + " (url=" + url + ")";
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayMediaUrl2D(url, loop, volume, &err))
+        //         return "media_url failed: " + err + " (url=" + url + ")";
 
-            return "media_url ok";
-        });
+        //     return "media_url ok";
+        // });
 
-        Register("media_file_attach", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.size() < 2)
-                return "Usage: media_file_attach <actorSelector:player|npc_nearest|name-substring> <FilePath> [loop:0|1] [volume]";
+        // Register("media_file_attach", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.size() < 2)
+        //         return "Usage: media_file_attach <actorSelector:player|npc_nearest|name-substring> <FilePath> [loop:0|1] [volume]";
 
-            const std::string selector = args[0];
-            const std::string filePath = args[1];
-            bool loop = false;
-            float volume = 1.0f;
+        //     const std::string selector = args[0];
+        //     const std::string filePath = args[1];
+        //     bool loop = false;
+        //     float volume = 1.0f;
 
-            if (args.size() >= 3)
-                loop = ParseBoolArg(args[2], false);
-            if (args.size() >= 4)
-            {
-                try { volume = std::stof(args[3]); } catch (...) { return "Invalid volume: " + args[3]; }
-            }
+        //     if (args.size() >= 3)
+        //         loop = ParseBoolArg(args[2], false);
+        //     if (args.size() >= 4)
+        //     {
+        //         try { volume = std::stof(args[3]); } catch (...) { return "Invalid volume: " + args[3]; }
+        //     }
 
-            std::string resolved;
-            std::string err;
-            if (!Mod::ModFeedback::PlayMediaFileAttached3D(selector, filePath, loop, volume, &resolved, &err))
-                return "media_file_attach failed: " + err;
+        //     std::string resolved;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayMediaFileAttached3D(selector, filePath, loop, volume, &resolved, &err))
+        //         return "media_file_attach failed: " + err;
 
-            return "media_file_attach ok: actor=" + resolved;
-        });
+        //     return "media_file_attach ok: actor=" + resolved;
+        // });
 
-        Register("media_url_attach", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.size() < 2)
-                return "Usage: media_url_attach <actorSelector:player|npc_nearest|name-substring> <Url> [loop:0|1] [volume]";
+        // Register("media_url_attach", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.size() < 2)
+        //         return "Usage: media_url_attach <actorSelector:player|npc_nearest|name-substring> <Url> [loop:0|1] [volume]";
 
-            const std::string selector = args[0];
-            const std::string url = args[1];
-            bool loop = false;
-            float volume = 1.0f;
+        //     const std::string selector = args[0];
+        //     const std::string url = args[1];
+        //     bool loop = false;
+        //     float volume = 1.0f;
 
-            if (args.size() >= 3)
-                loop = ParseBoolArg(args[2], false);
-            if (args.size() >= 4)
-            {
-                try { volume = std::stof(args[3]); } catch (...) { return "Invalid volume: " + args[3]; }
-            }
+        //     if (args.size() >= 3)
+        //         loop = ParseBoolArg(args[2], false);
+        //     if (args.size() >= 4)
+        //     {
+        //         try { volume = std::stof(args[3]); } catch (...) { return "Invalid volume: " + args[3]; }
+        //     }
 
-            std::string resolved;
-            std::string err;
-            if (!Mod::ModFeedback::PlayMediaUrlAttached3D(selector, url, loop, volume, &resolved, &err))
-                return "media_url_attach failed: " + err;
+        //     std::string resolved;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayMediaUrlAttached3D(selector, url, loop, volume, &resolved, &err))
+        //         return "media_url_attach failed: " + err;
 
-            return "media_url_attach ok: actor=" + resolved;
-        });
+        //     return "media_url_attach ok: actor=" + resolved;
+        // });
 
-        Register("media_list", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            std::size_t maxEntries = 16;
-            if (!args.empty())
-            {
-                try { maxEntries = static_cast<std::size_t>(std::stoul(args[0])); }
-                catch (...) { return "Invalid maxEntries: " + args[0]; }
-            }
-            return Mod::ModFeedback::DescribeActiveMedia(maxEntries);
-        });
+        // Register("media_list", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     std::size_t maxEntries = 16;
+        //     if (!args.empty())
+        //     {
+        //         try { maxEntries = static_cast<std::size_t>(std::stoul(args[0])); }
+        //         catch (...) { return "Invalid maxEntries: " + args[0]; }
+        //     }
+        //     return Mod::ModFeedback::DescribeActiveMedia(maxEntries);
+        // });
 
-        Register("media_stop", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            (void)args;
-            const int stopped = Mod::ModFeedback::StopAllMedia();
-            return "media_stop: closed " + std::to_string(stopped) + " player(s)";
-        });
+        // Register("media_stop", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     (void)args;
+        //     const int stopped = Mod::ModFeedback::StopAllMedia();
+        //     return "media_stop: closed " + std::to_string(stopped) + " player(s)";
+        // });
 
-        Register("sound_groups_scan", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: sound_groups_scan <FolderPath>";
+        // Register("sound_groups_scan", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: sound_groups_scan <FolderPath>";
 
-            std::string err;
-            if (!Mod::ModFeedback::ScanSoundGroupsFromFolder(args[0], &err))
-                return "sound_groups_scan failed: " + err;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::ScanSoundGroupsFromFolder(args[0], &err))
+        //         return "sound_groups_scan failed: " + err;
 
-            return Mod::ModFeedback::DescribeSoundGroups(20, 3);
-        });
+        //     return Mod::ModFeedback::DescribeSoundGroups(20, 3);
+        // });
 
-        Register("sound_groups_list", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
+        // Register("sound_groups_list", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
 
-            std::size_t maxGroups = 20;
-            std::size_t maxEntries = 5;
-            if (args.size() >= 1)
-            {
-                try { maxGroups = static_cast<std::size_t>(std::stoul(args[0])); }
-                catch (...) { return "Invalid maxGroups: " + args[0]; }
-            }
-            if (args.size() >= 2)
-            {
-                try { maxEntries = static_cast<std::size_t>(std::stoul(args[1])); }
-                catch (...) { return "Invalid maxEntries: " + args[1]; }
-            }
+        //     std::size_t maxGroups = 20;
+        //     std::size_t maxEntries = 5;
+        //     if (args.size() >= 1)
+        //     {
+        //         try { maxGroups = static_cast<std::size_t>(std::stoul(args[0])); }
+        //         catch (...) { return "Invalid maxGroups: " + args[0]; }
+        //     }
+        //     if (args.size() >= 2)
+        //     {
+        //         try { maxEntries = static_cast<std::size_t>(std::stoul(args[1])); }
+        //         catch (...) { return "Invalid maxEntries: " + args[1]; }
+        //     }
 
-            return Mod::ModFeedback::DescribeSoundGroups(maxGroups, maxEntries);
-        });
+        //     return Mod::ModFeedback::DescribeSoundGroups(maxGroups, maxEntries);
+        // });
 
-        Register("playrandomsound", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world;
-            if (args.empty())
-                return "Usage: playrandomsound <GroupName> [loop:0|1] [volume]";
+        // Register("playrandomsound", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+        //          {
+        //     (void)world;
+        //     if (args.empty())
+        //         return "Usage: playrandomsound <GroupName> [loop:0|1] [volume]";
 
-            const std::string groupName = args[0];
-            bool loop = false;
-            float volume = 1.0f;
+        //     const std::string groupName = args[0];
+        //     bool loop = false;
+        //     float volume = 1.0f;
 
-            if (args.size() >= 2)
-                loop = ParseBoolArg(args[1], false);
-            if (args.size() >= 3)
-            {
-                try { volume = std::stof(args[2]); }
-                catch (...) { return "Invalid volume: " + args[2]; }
-            }
+        //     if (args.size() >= 2)
+        //         loop = ParseBoolArg(args[1], false);
+        //     if (args.size() >= 3)
+        //     {
+        //         try { volume = std::stof(args[2]); }
+        //         catch (...) { return "Invalid volume: " + args[2]; }
+        //     }
 
-            std::string chosen;
-            std::string err;
-            if (!Mod::ModFeedback::PlayRandomSoundGroup2D(groupName, loop, volume, &chosen, &err))
-                return "playrandomsound failed: " + err + " (group=" + groupName + ")";
+        //     std::string chosen;
+        //     std::string err;
+        //     if (!Mod::ModFeedback::PlayRandomSoundGroup2D(groupName, loop, volume, &chosen, &err))
+        //         return "playrandomsound failed: " + err + " (group=" + groupName + ")";
 
-            return "playrandomsound ok: " + chosen;
-        });
+        //     return "playrandomsound ok: " + chosen;
+        // });
 
         Register("bullettime", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
                  {
@@ -656,6 +656,7 @@ namespace Mod
             g_Cheats.SetHungerDisabled(true);
             g_Cheats.SetFatigueDisabled(true);
             g_Cheats.ToggleAnomaliesDisabled(); // replace this when we have a set command for anomalies.
+            g_Cheats.ToggleAutoMag(); // ditto for auto-mag
             Mod::Friend::FriendSubsystem::Get()->SpawnFriend(world);
             g_Cheats.SetPortableLightIntensityScale(10.0f);
             return "Test setup applied: godmode, unlimited ammo, hunger/fatigue disabled, anomalies disabled, friend spawned, portable light scale set to 10" ;
@@ -819,13 +820,13 @@ namespace Mod
         // -----------------------------------------------------------------
         // Heal item (spawn QuickHeal near player)
         // -----------------------------------------------------------------
-        Register("heal", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
-                 {
-            (void)args;
-            if (!world)
-                return "heal: world not ready";
-            return g_Cheats.SpawnHealItem(world);
-        });
+        // Register("heal", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+        //          {
+        //     (void)args;
+        //     if (!world)
+        //         return "heal: world not ready";
+        //     return g_Cheats.SpawnHealItem(world);
+        // });
     }
 
     // Expose cheats update for main loop

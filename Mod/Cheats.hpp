@@ -56,9 +56,6 @@ namespace Mod
         void ToggleNoClip();
         bool IsNoClipActive() const;
 
-        // Toggle whether the player is allowed to jump
-        void ToggleJumpAllowed();
-        bool IsJumpAllowedActive() const;
 
         // Add money instantly (delta may be negative)
         void AddMoney(int amount);
@@ -121,7 +118,6 @@ namespace Mod
 
         // additional cheat state
         std::atomic<bool> noClipActive_{false};
-        std::atomic<bool> jumpAllowedActive_{false};
         std::atomic<bool> debugModeActive_{false};
         std::atomic<bool> anomaliesDisabled_{false};
         std::atomic<bool> autoMagActive_{false};

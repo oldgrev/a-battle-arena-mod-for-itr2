@@ -219,6 +219,25 @@ RegisterNamedHook("FunctionName", [](UObject* obj, UFunction* func, void* parms,
 
 ## Key Data Structures
 
+## Loadout Apply/Clear Notes
+
+### Pre-clear detachment pass (important)
+
+When applying a loadout, clearing the current gear now performs a **targeted detach pass** before actor destruction.
+
+- Target chain roots:
+  - `Player-Holster.Player.Vest`
+  - `Player-Holster.Player.Backpack`
+  - `Player-Holster.Player.Helmet`
+  - Any chain whose ancestor item type starts with `Item.Equipment.Modules.ItemSlot`
+- Detach behavior:
+  - Enumerate current player inventory (`GetPlayersInventory`)
+  - Resolve each item's current parent container object
+  - Detach in child-first order using `URadiusContainerSubsystem::DropHolsteredActor(Container, Item)`
+  - Run normal actor destruction after detach
+
+This avoids a map-load edge case where previously equipped items can be reattached by the game while newly loaded items are also spawned, resulting in duplicate gear and unattached replacements.
+
 ### FFirearmComponentShotExtendedRep
 - **Purpose**: Data structure for shot information
 - **Properties**:

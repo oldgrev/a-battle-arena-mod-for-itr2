@@ -33,6 +33,14 @@ AILEARNINGS
       direct line-of-sight when possible
     * always reset stuck counter and update lastFollowPosition after teleport
   Additionally, set the NPCController state to Combat before issuing MoveToLocation so the command is honored.
+- FOLLOW BROKEN FIX (2026-02-27): Friend NPCs were not following the player beyond a few steps.
+  Root cause: TickIdleReset ran every 10s and reset the NPC to Idle state, which cancelled the
+  MoveToLocation commands issued by TickFollow. Meanwhile, kFriendFollowCooldownBase was 20s,
+  so the NPC only got a new movement command every 20s but was reset to Idle after 10s.
+  Fix: (1) reduced kFriendFollowCooldownBase from 20s to 3s so follow commands are reissued faster.
+  (2) added lastFollowCommandTime timestamp to FriendEntry; TickIdleReset now skips the Idle
+  reset if a follow command was issued within kFriendFollowGraceSeconds (8s). Perception disable
+  is still re-applied regardless. (3) added kFriendFollowGraceSeconds constant to ModTuning.
 */
 
 #include "FriendSubsystem.hpp"
@@ -659,6 +667,7 @@ namespace Mod::Friend
             LOG_INFO("[Friend] TickFollow: moving friend to follow player (dist=" << dist << ")");
             // schedule next allowed follow command
             e.nextFollowTime = currentTime + JitteredInterval(Mod::Tuning::kFriendFollowCooldownBase);
+            e.lastFollowCommandTime = currentTime; // record so TickIdleReset won't cancel movement
         }
     }
 
@@ -798,10 +807,18 @@ namespace Mod::Friend
         if (!e.Actor || !SDK::UKismetSystemLibrary::IsValid(e.Actor)) return;
         auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(e.Actor);
 
-        // Re-assert Idle state.
-        ResetToIdle(aiChar);
+        // FOLLOW-FIX: Only reset to Idle when not actively following.
+        // TickFollow sets lastFollowCommandTime when it issues MoveToLocation.
+        // If we reset to Idle while the NPC is executing a movement order, the
+        // movement gets cancelled and the NPC stands still forever.
+        const bool recentlyFollowing = (time - e.lastFollowCommandTime) < Mod::Tuning::kFriendFollowGraceSeconds;
+        if (!recentlyFollowing)
+        {
+            ResetToIdle(aiChar);
+        }
 
         // Re-apply perception disable as a safety net (e.g. level reload may re-enable it).
+        // This is independent of the Idle reset -- we ALWAYS want the friend's perception off.
         if (aiChar->AIController)
         {
             SDK::URadiusAIPerceptionComponent* perc = aiChar->AIController->AIPerceptionComponent;

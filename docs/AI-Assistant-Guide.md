@@ -33,13 +33,14 @@ The initial phase of the mod is focused on implementing game changing modificati
 - **God Mode** (prevents player death; likely implemented via health locking in `Cheats::Update`)
 - **Hunger/Fatigue Bypass** (disables hunger and fatigue accumulation)
   *note:* previous implementation used `ChangeHungerAndNotifyAll` deltas and allowed hunger to creep up; the cheat now simply jams `CurrentHunger` to a high value every frame.
+- **AutoMag** (magazines placed in body pouches instantly refill their ammo; implemented via `SetHolsteredActor` hook on `URadiusHolsterComponent` with class-based filtering to skip weapon mag slots and hand holsters)
 - **NoClip** (toggle world collision via cheat subsystem)
 - **JumpAllowed** (enable/disable player jumping)
 - **Money/Access Level** commands (uses cheat subsystem or game replicator to grant funds or change access)
 - **Debug Mode** (internal boolean for extra log messaging)
 
 
-Both cheats can now be toggled via TCP commands (`ammo`, `durability`, `bullettime`, `godmode`, `hunger`, `fatigue`) and via the built-in in-game cheat panel checkboxes (see below).
+Both cheats can now be toggled via TCP commands (`ammo`, `durability`, `bullettime`, `godmode`, `hunger`, `fatigue`, `automag`) and via the built-in in-game cheat panel checkboxes (see below).
 
 ## High-level approach
 

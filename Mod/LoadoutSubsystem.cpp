@@ -40,11 +40,14 @@ AILEARNINGS
 #include <set>
 #include <functional>
 #include <cmath>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
 namespace Mod::Loadout
 {
+    static std::pair<std::string, std::string> ParseParentUid(const std::string& parentUid);
+
     // Helper to convert narrow string to wide string (for FName/FString creation)
     static std::wstring ToWideString(const std::string& str)
     {
@@ -1011,6 +1014,206 @@ namespace Mod::Loadout
             LOG_ERROR("[Loadout] ClearPlayerLoadout: Player pawn not found");
             return 0;
         }
+
+        // Step 1: Detach targeted equipped chains before destruction.
+        // This prevents map-load re-equip reparenting from leaving old items attached.
+        auto startsWith = [](const std::string& s, const std::string& p) -> bool
+        {
+            return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+        };
+
+        auto isPlayerDetachRoot = [&](const std::string& parentUid) -> bool
+        {
+            return startsWith(parentUid, "Player-Holster.Player.Vest") ||
+                   startsWith(parentUid, "Player-Holster.Player.Backpack") ||
+                   startsWith(parentUid, "Player-Holster.Player.Helmet");
+        };
+
+        struct DetachCandidate
+        {
+            std::string uid;
+            std::string parentUid;
+            std::string itemTypeTag;
+            SDK::ARadiusItemBase* actor = nullptr;
+        };
+
+        std::vector<DetachCandidate> candidates;
+        std::map<std::string, size_t> uidToIndex;
+
+        try
+        {
+            SDK::TArray<SDK::URadiusItemDynamicData*> inv = containerSubsystem->GetPlayersInventory();
+            candidates.reserve(inv.Num());
+
+            for (int i = 0; i < inv.Num(); i++)
+            {
+                SDK::URadiusItemDynamicData* itemData = inv[i];
+                if (!itemData)
+                {
+                    continue;
+                }
+
+                DetachCandidate c;
+                c.uid = itemData->InstanceUid.ToString();
+                c.parentUid = itemData->ParentContainerUid.ToString();
+                c.itemTypeTag = itemData->ItemType.TagName.ToString();
+                c.actor = containerSubsystem->GetItemByContainerID(itemData->InstanceUid);
+
+                uidToIndex[c.uid] = candidates.size();
+                candidates.push_back(std::move(c));
+            }
+
+            LOG_INFO("[Loadout] Detach prepass: collected " << candidates.size() << " inventory candidates");
+        }
+        catch (...)
+        {
+            LOG_WARN("[Loadout] Detach prepass: failed to collect inventory snapshot");
+        }
+
+        auto shouldDetachByChain = [&](const std::string& leafUid) -> bool
+        {
+            std::set<std::string> visited;
+            std::string cursorUid = leafUid;
+
+            while (!cursorUid.empty() && visited.insert(cursorUid).second)
+            {
+                auto it = uidToIndex.find(cursorUid);
+                if (it == uidToIndex.end())
+                {
+                    return false;
+                }
+
+                const DetachCandidate& node = candidates[it->second];
+
+                if (startsWith(node.itemTypeTag, "Item.Equipment.Modules.ItemSlot"))
+                {
+                    return true;
+                }
+
+                if (isPlayerDetachRoot(node.parentUid))
+                {
+                    return true;
+                }
+
+                auto [baseUid, slotSuffix] = ParseParentUid(node.parentUid);
+                (void)slotSuffix;
+                if (baseUid.empty())
+                {
+                    return false;
+                }
+
+                cursorUid = baseUid;
+            }
+
+            return false;
+        };
+
+        auto chainDepth = [&](const std::string& leafUid) -> int
+        {
+            int depth = 0;
+            std::set<std::string> visited;
+            std::string cursorUid = leafUid;
+
+            while (!cursorUid.empty() && visited.insert(cursorUid).second)
+            {
+                auto it = uidToIndex.find(cursorUid);
+                if (it == uidToIndex.end())
+                {
+                    break;
+                }
+
+                const DetachCandidate& node = candidates[it->second];
+                auto [baseUid, slotSuffix] = ParseParentUid(node.parentUid);
+                (void)slotSuffix;
+                if (baseUid.empty())
+                {
+                    break;
+                }
+
+                depth++;
+                cursorUid = baseUid;
+            }
+
+            return depth;
+        };
+
+        std::vector<size_t> detachOrder;
+        detachOrder.reserve(candidates.size());
+
+        for (size_t i = 0; i < candidates.size(); i++)
+        {
+            const auto& c = candidates[i];
+            if (!c.actor)
+            {
+                continue;
+            }
+
+            if (c.itemTypeTag.find("Tablet") != std::string::npos)
+            {
+                continue;
+            }
+
+            if (shouldDetachByChain(c.uid))
+            {
+                detachOrder.push_back(i);
+            }
+        }
+
+        std::sort(detachOrder.begin(), detachOrder.end(), [&](size_t a, size_t b)
+        {
+            return chainDepth(candidates[a].uid) > chainDepth(candidates[b].uid);
+        });
+
+        int detachedCount = 0;
+        for (size_t idx : detachOrder)
+        {
+            const auto& c = candidates[idx];
+
+            SDK::UObject* parentContainer = nullptr;
+            try
+            {
+                if (startsWith(c.parentUid, "Player-"))
+                {
+                    parentContainer = GetPlayerBodySlotContainer(world, c.parentUid);
+                }
+                else
+                {
+                    std::wstring wParent = ToWideString(c.parentUid);
+                    SDK::FString fParent(wParent.c_str());
+                    parentContainer = containerSubsystem->GetContainerObject(fParent);
+                }
+            }
+            catch (...)
+            {
+                parentContainer = nullptr;
+            }
+
+            if (!parentContainer)
+            {
+                LOG_WARN("[Loadout] Detach prepass: parent container not found for " << c.itemTypeTag
+                         << " parent=" << c.parentUid);
+                continue;
+            }
+
+            try
+            {
+                if (containerSubsystem->DropHolsteredActor(parentContainer, c.actor))
+                {
+                    detachedCount++;
+                }
+                else
+                {
+                    LOG_WARN("[Loadout] Detach prepass: DropHolsteredActor returned false for " << c.itemTypeTag);
+                }
+            }
+            catch (...)
+            {
+                LOG_WARN("[Loadout] Detach prepass: DropHolsteredActor threw for " << c.itemTypeTag);
+            }
+        }
+
+        LOG_INFO("[Loadout] Detach prepass complete: detached " << detachedCount
+                 << " of " << detachOrder.size() << " targeted items");
         
         int droppedCount = 0;
         

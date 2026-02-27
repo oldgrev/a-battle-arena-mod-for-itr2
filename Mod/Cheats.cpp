@@ -6,6 +6,12 @@ Added explicit 'Set*' methods for cheat toggles (godmode, unlimited ammo, hunger
 were required by CommandHandler and arena startup code. The setters simply call the existing toggles
 when the desired state differs. This change fixed multiple C2039 compile errors when invoking
 SetUnlimitedAmmo/SetGodMode/etc.
+- Anomaly disable cheat (2026-02-27): Uses GetAllActorsOfClass for AAnomalyBase and
+  ABP_AnomalySpawner_C. Destroys anomaly actors and disables ticking on spawner actors.
+  ApplyAnomalySuppression is called every tick to catch newly-spawned anomalies while active.
+- Heal item spawn (2026-02-27): Uses UFLSpawn::SpawnItemByTypeTag with tag
+  "Item.Consumable.Injector.QuickHeal" to spawn a healing injector near the player.
+  Uses the same FGameplayTag creation pattern as LoadoutSubsystem (StringToName).
 */
 
 #include "Cheats.hpp"
@@ -378,6 +384,33 @@ namespace Mod
         return portableLightIntensityScale_.load(std::memory_order_relaxed);
     }
 
+    void Cheats::SetPortableLightFadeDistanceScale(float scale)
+    {
+        if (!std::isfinite(scale))
+            scale = 1.0f;
+
+        if (scale < 0.05f) scale = 0.05f;
+        if (scale > 20.0f) scale = 20.0f;
+
+        const float current = portableLightFadeDistanceScale_.load(std::memory_order_relaxed);
+        if (std::fabs(current - scale) > 0.0001f)
+        {
+            portableLightFadeDistanceScale_.store(scale, std::memory_order_relaxed);
+            portableLightScaleDirty_.store(true, std::memory_order_release);
+        }
+
+        std::wstringstream msg;
+        msg << L"[Mod] Light fade distance scale: " << scale;
+        Mod::ModFeedback::ShowMessage(msg.str().c_str(), 3.0f, SDK::FLinearColor{0.9f, 0.9f, 0.2f, 1.0f});
+
+        LOG_INFO("[Cheats] Portable light fade distance scale set to " << scale);
+    }
+
+    float Cheats::GetPortableLightFadeDistanceScale() const
+    {
+        return portableLightFadeDistanceScale_.load(std::memory_order_relaxed);
+    }
+
     std::string Cheats::GetStatus() const
     {
         std::ostringstream status;
@@ -390,6 +423,8 @@ namespace Mod
         status << "  Bullet Time: " << (bulletTimeActive_ ? "ACTIVE" : "inactive") << " (Scale: " << bulletTimeScale_ << ")\n";
         status << "  NoClip: " << (noClipActive_ ? "ON" : "off") << "\n";
         status << "  Jump Allowed: " << (jumpAllowedActive_ ? "ON" : "off") << "\n";
+        status << "  Anomalies Disabled: " << (anomaliesDisabled_ ? "ACTIVE" : "inactive") << "\n";
+        status << "  AutoMag: " << (autoMagActive_ ? "ACTIVE" : "inactive") << "\n";
         status << "  Debug Mode: " << (debugModeActive_ ? "ON" : "off");
         return status.str();
     }
@@ -406,9 +441,12 @@ namespace Mod
         if (noClipActive_) ToggleNoClip();
         if (jumpAllowedActive_) ToggleJumpAllowed();
         if (debugModeActive_) ToggleDebugMode();
+        if (autoMagActive_) ToggleAutoMag();
+        // Note: anomaliesDisabled_ is NOT toggled on level change -- it persists intentionally.
 
         // Clear any cached light pointers/intensities on level change.
         portableLightOriginalIntensity_.clear();
+        portableLightOriginalFadeDistance_.clear();
         portableLightScaleDirty_.store(true, std::memory_order_release);
         lastPortableLightWorld_ = nullptr;
         lastBulletTimeWorld_ = nullptr;
@@ -426,13 +464,15 @@ namespace Mod
             return;
 
         const float scale = portableLightIntensityScale_.load(std::memory_order_relaxed);
-        if (!std::isfinite(scale) || scale <= 0.0f)
+        const float fadeScale = portableLightFadeDistanceScale_.load(std::memory_order_relaxed);
+        if (!std::isfinite(scale) || scale <= 0.0f || !std::isfinite(fadeScale) || fadeScale <= 0.0f)
             return;
 
         // Default scale: do nothing unless we've previously scaled lights (or need to resync after a level change).
         const bool isDefault = std::fabs(scale - 1.0f) < 0.0001f;
+        const bool fadeIsDefault = std::fabs(fadeScale - 1.0f) < 0.0001f;
         const bool dirty = portableLightScaleDirty_.load(std::memory_order_acquire);
-        if (isDefault && !dirty)
+        if (isDefault && fadeIsDefault && !dirty)
             return;
 
         portableLightScaleDirty_.store(false, std::memory_order_release);
@@ -452,16 +492,36 @@ namespace Mod
                 return;
 
             auto* base = static_cast<SDK::ULightComponentBase*>(light);
+            auto* lightComp = static_cast<SDK::ULightComponent*>(light);
             auto it = portableLightOriginalIntensity_.find(base);
             if (it == portableLightOriginalIntensity_.end())
             {
                 it = portableLightOriginalIntensity_.emplace(base, base->Intensity).first;
             }
 
+            auto fadeIt = portableLightOriginalFadeDistance_.find(base);
+            if (fadeIt == portableLightOriginalFadeDistance_.end())
+            {
+                fadeIt = portableLightOriginalFadeDistance_.emplace(base, lightComp->LightFunctionFadeDistance).first;
+            }
+
             const float target = it->second * scale;
+            const float targetFadeDistance = fadeIt->second * fadeScale;
+            bool changed = false;
             if (std::fabs(base->Intensity - target) > 0.01f)
             {
                 light->SetIntensity(target);
+                changed = true;
+            }
+
+            if (std::fabs(lightComp->LightFunctionFadeDistance - targetFadeDistance) > 0.01f)
+            {
+                lightComp->SetLightFunctionFadeDistance(targetFadeDistance);
+                changed = true;
+            }
+
+            if (changed)
+            {
                 touched++;
             }
         };
@@ -517,6 +577,7 @@ namespace Mod
         {
             lastPortableLightWorld_ = world;
             portableLightOriginalIntensity_.clear();
+            portableLightOriginalFadeDistance_.clear();
             portableLightScaleDirty_.store(true, std::memory_order_release);
         }
 
@@ -571,6 +632,11 @@ namespace Mod
         {
             ApplyPortableLightBrightness(world, player);
         }
+
+        // Anomaly suppression: destroy anomalies and disable spawners every tick while cheat is active.
+        // Throttled internally -- the first time it runs it clears everything, subsequent checks are fast
+        // (GetAllActorsOfClass returns empty arrays once everything is destroyed/disabled).
+        ApplyAnomalySuppression(world);
     }
 
     // body dilation doesn't even work, arms and the player weapon move so slow which is crap in vr. to do
@@ -793,6 +859,175 @@ namespace Mod
             float maxStamina = playerStats->GetMaxStaminaAffectedByHunger();
             playerStats->CurrentStamina = maxStamina;
             // another one for hooking
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Anomaly disable/enable cheat
+    // -----------------------------------------------------------------------
+
+    void Cheats::ToggleAnomaliesDisabled()
+    {
+        anomaliesDisabled_ = !anomaliesDisabled_;
+        LOG_INFO("[Cheats] Anomalies " << (anomaliesDisabled_ ? "DISABLED" : "ENABLED"));
+
+        Mod::ModFeedback::ShowMessage(
+            anomaliesDisabled_ ? L"[Mod] Anomalies: DISABLED" : L"[Mod] Anomalies: ENABLED",
+            3.0f,
+            anomaliesDisabled_ ? SDK::FLinearColor{1.0f, 0.8f, 0.2f, 1.0f}
+                               : SDK::FLinearColor{0.4f, 1.0f, 0.4f, 1.0f});
+    }
+
+    bool Cheats::IsAnomaliesDisabledActive() const
+    {
+        return anomaliesDisabled_;
+    }
+
+    // -----------------------------------------------------------------------
+    // Automag: magazines placed in mag pouches auto-refill
+    // -----------------------------------------------------------------------
+
+    void Cheats::ToggleAutoMag()
+    {
+        autoMagActive_ = !autoMagActive_;
+        LOG_INFO("[Cheats] AutoMag " << (autoMagActive_ ? "ENABLED" : "DISABLED"));
+
+        // Propagate to HookManager so the ProcessEvent hook knows the state
+        HookManager::Get().SetAutoMagEnabled(autoMagActive_);
+
+        Mod::ModFeedback::ShowMessage(
+            autoMagActive_ ? L"[Mod] AutoMag: ENABLED (mags auto-refill in pouches)"
+                           : L"[Mod] AutoMag: DISABLED",
+            3.0f,
+            autoMagActive_ ? SDK::FLinearColor{0.2f, 1.0f, 0.6f, 1.0f}
+                           : SDK::FLinearColor{0.8f, 0.4f, 0.4f, 1.0f});
+    }
+
+    bool Cheats::IsAutoMagActive() const
+    {
+        return autoMagActive_;
+    }
+
+    void Cheats::SetAutoMag(bool enabled)
+    {
+        if (autoMagActive_ != enabled) ToggleAutoMag();
+    }
+
+    void Cheats::ApplyAnomalySuppression(SDK::UWorld* world)
+    {
+        if (!anomaliesDisabled_ || !world) return;
+
+        Mod::ScopedProcessEventGuard guard;
+
+        // Destroy all existing anomaly actors.
+        {
+            SDK::TArray<SDK::AActor*> anomalies;
+            SDK::UGameplayStatics::GetAllActorsOfClass(
+                world, SDK::AAnomalyBase::StaticClass(), &anomalies);
+
+            const int32_t count = GetTArrayNum(anomalies);
+            SDK::AActor** data  = GetTArrayData(anomalies);
+
+            for (int32_t i = 0; i < count; ++i)
+            {
+                if (data[i] && SDK::UKismetSystemLibrary::IsValid(data[i]))
+                {
+                    data[i]->K2_DestroyActor();
+                }
+            }
+
+            if (count > 0)
+            {
+                LOG_INFO("[Cheats] ApplyAnomalySuppression: destroyed " << count << " anomalies");
+            }
+        }
+
+        // Disable all anomaly spawner actors (stop ticking so they can't spawn new ones).
+        {
+            SDK::TArray<SDK::AActor*> spawners;
+            SDK::UGameplayStatics::GetAllActorsOfClass(
+                world, SDK::AAnomalySpawnPoint::StaticClass(), &spawners);
+
+            const int32_t count = GetTArrayNum(spawners);
+            SDK::AActor** data  = GetTArrayData(spawners);
+
+            for (int32_t i = 0; i < count; ++i)
+            {
+                if (data[i] && SDK::UKismetSystemLibrary::IsValid(data[i]))
+                {
+                    data[i]->SetActorTickEnabled(false);
+                    data[i]->SetActorHiddenInGame(true);
+                    data[i]->SetActorEnableCollision(false);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Spawn a QuickHeal injector near the player
+    // -----------------------------------------------------------------------
+
+    std::string Cheats::SpawnHealItem(SDK::UWorld* world)
+    {
+        if (!world) return "world is null";
+
+        Mod::ScopedProcessEventGuard guard;
+
+        SDK::APawn* player = Mod::GameContext::GetPlayerPawn(world);
+        if (!player) return "player not found";
+
+        // Get position slightly in front of the player.
+        SDK::FVector playerLoc = player->K2_GetActorLocation();
+        SDK::FRotator playerRot = player->K2_GetActorRotation();
+        SDK::FVector forward = SDK::UKismetMathLibrary::GetForwardVector(playerRot);
+
+        SDK::FVector spawnLoc;
+        spawnLoc.X = playerLoc.X + forward.X * 80.0f;
+        spawnLoc.Y = playerLoc.Y + forward.Y * 80.0f;
+        spawnLoc.Z = playerLoc.Z + 50.0f; // roughly hand height
+
+        SDK::FTransform spawnTransform = SDK::UKismetMathLibrary::MakeTransform(
+            spawnLoc, playerRot, {1.0f, 1.0f, 1.0f});
+
+        // Build the gameplay tag for the heal item.
+        static const wchar_t* kHealItemTag = L"Item.Consumable.Injector.QuickHeal";
+        SDK::FGameplayTag typeTag;
+        typeTag.TagName = SDK::BasicFilesImpleUtils::StringToName(kHealItemTag);
+
+        SDK::FItemConfiguration cfg{};
+        cfg.bShopItem = false;
+        cfg.StartDurabilityRatio = 1.0f;
+        cfg.StackAmount = 1;
+
+        try
+        {
+            SDK::AActor* actor = SDK::UFLSpawn::SpawnItemByTypeTag(
+                world, typeTag, spawnTransform, cfg, true);
+
+            if (actor)
+            {
+                std::string name = actor->GetName();
+                LOG_INFO("[Cheats] Spawned heal item: " << name);
+                Mod::ModFeedback::ShowMessage(
+                    L"[Mod] QuickHeal spawned!", 2.0f,
+                    SDK::FLinearColor{0.2f, 1.0f, 0.5f, 1.0f});
+                return "Spawned: " + name;
+            }
+            else
+            {
+                LOG_ERROR("[Cheats] SpawnItemByTypeTag returned null for QuickHeal");
+                return "failed: SpawnItemByTypeTag returned null";
+            }
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("[Cheats] Exception spawning heal item: " << e.what());
+            return std::string("failed: ") + e.what();
+        }
+        catch (...)
+        {
+            LOG_ERROR("[Cheats] Unknown exception spawning heal item");
+            return "failed: unknown exception";
         }
     }
 

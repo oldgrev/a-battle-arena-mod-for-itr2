@@ -124,7 +124,7 @@ namespace Mod::Tuning
     // throttle how often a friend will be told to move when he's too far away.  Without this,
     // the NPC may receive movement commands every single tick while the player walks, which
     // shows up as repeated log lines and extra AI churn.
-    inline constexpr float kFriendFollowCooldownBase     = 20.0f;  // seconds; jittered ±kFriendJitterFraction
+    inline constexpr float kFriendFollowCooldownBase     = 3.0f;   // seconds; jittered ±kFriendJitterFraction
     inline constexpr float kFriendRepositionIntervalBase = 30.0f; // seconds; jittered ±50%
     inline constexpr float kFriendAmbientSoundIntervalBase = 30.0f;
     inline constexpr float kFriendEnemySpotCheckIntervalBase = 60.0f; // how often we check for enemies
@@ -138,6 +138,7 @@ namespace Mod::Tuning
     // Extra friend movement tuning
     inline constexpr float kFriendStuckTeleportFraction = 0.20f;      // teleport step as fraction of distance when stuck
     inline constexpr float kFriendCatchupDistanceThreshold = 4000.0f; // if farther than this on stuck, teleport within 4000
+    inline constexpr float kFriendFollowGraceSeconds = 8.0f;          // after issuing a follow command, don't reset to Idle for this long
 
     // Sound system
     inline constexpr const char* kDefaultSoundsFolder = "sounds";   // relative to CWD

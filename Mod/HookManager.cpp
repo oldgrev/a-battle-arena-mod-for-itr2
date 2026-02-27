@@ -26,6 +26,24 @@
 //   Fix: avoid `GetClass()` and rely on `GetFullName()` (which includes class/name context) or access the UClass pointer only if the SDK actually exposes it.
 // - Trace/notification gotcha: ProcessEvent tracing will show `BP_RadiusPlayerCharacter_Gameplay_C.ShowSubtitles`, but it will NOT show `UFLGeneral::ShowMessage` because that's a native static call (not a reflected ProcessEvent).
 //   Fix: when bridging notifications, log an explicit `[NotifBridge] MIRROR ...` line so we can prove popup emission in one VR run.
+// - UE4 Interface casting: SDK interfaces (e.g. IRadiusDataComponentInterface) cannot be used via reinterpret_cast<IInterface*>(UObject*) because interface vtables differ from UObject vtables.
+//   Fix: use ProcessEvent directly: find the UFunction via `obj->Class->GetFunction("InterfaceName", "FunctionName")`, define a local params struct matching the SDK Params:: layout, and call `obj->ProcessEvent(fn, &params)`.
+// - TWeakObjectPtr resolution: This SDK version's TUObjectArray has `GetByIndex(int32)` returning UObject*, NOT `GetItemByIndex()`. FUObjectItem has no `GetSerialNumber()`.
+//   Fix: use `GObjects->GetByIndex(objectIndex)` directly and skip serial number validation.
+// - SDK::FMemory::Realloc does not exist in this SDK version. The SDK uses CRT malloc/realloc internally (see UnrealContainers.hpp).
+//   Fix: use CRT `realloc()` for TArray buffer growth in manual array manipulation.
+// - AutoMag hook: OnItemHolsterAttachChanged_Event only fires on BPC_ItemHolster_C subclasses (weapon mag slots, hands). Body pouch holsters
+//   are native URadiusHolsterComponent instances WITHOUT a BPC layer, so that event NEVER fires for them.
+//   Fix: hook SetHolsteredActor instead, which fires via ProcessEvent for ALL holster types (native + BPC). Filter out weapon mag slots
+//   (UBPC_RadiusMagazineSlot_C, crashes) and hand holsters (UBPC_PlayerCharacterHandHolster_C, spam). The existing Hook_SetHolsteredActor
+//   was already catching tablet holster events, confirming it works for native holsters.
+// - AutoMag holster classification: checking object name for "Magazine" substring caused false positive on BPC_RadiusMagazineSlot_C (weapon mag slot).
+//   Fix: use IsA() class checks to exclude known-bad holster types rather than string matching.
+// - AutoMag crash: filling a magazine while being loaded into a weapon mag slot can crash. Weapon mag slots do complex things on attach.
+//   Fix: ALWAYS exclude UBPC_RadiusMagazineSlot_C from AutoMag processing, and wrap ALL AutoMag logic in try/catch.
+// - AutoMag capacity: GetAmmoContainerStaticData UFunction not found on some DataComponent classes. The interface function "RadiusDataComponentInterface"
+//   may not be implemented by all DataComponent subclasses.
+//   Fix: add a known-capacity lookup table keyed by magazine tag substrings (PM.Short→8, AK-74→30, etc.) and a tag-suffix parser as fallbacks.
 //
 
 
@@ -35,6 +53,7 @@
 #include "CommandQueue.hpp"
 #include "Logging.hpp"
 #include "ArenaSubsystem.hpp"
+#include "VRMenuSubsystem.hpp"
 
 #include "ModFeedback.hpp"
 #include "GameContext.hpp"
@@ -45,6 +64,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -591,6 +611,13 @@ namespace Mod
             SDK::ARadiusGrippableActorBase* ActorToHolster;
         };
 
+        struct PutItemToContainerParams
+        {
+            SDK::AActor* ItemActor;                    // 0x00
+            SDK::FTransform RelativeTransform;         // 0x08 (0x60 bytes)
+            bool ReturnValue;                          // 0x68
+        };
+
         // RequestAttackRole parameters (coordination subsystem).  We only care
         // about the return value, but matching layout prevents stack corruption.
         struct RequestAttackRoleParams
@@ -990,6 +1017,10 @@ namespace Mod
             return false;
         }
 
+        // Forward declarations for AutoMag (defined further below after helpers).
+        static void AutoMag_ProcessHolster(SDK::UObject* object, SDK::ARadiusGrippableActorBase* actorToHolster);
+        static void AutoMag_ProcessContainer(SDK::UObject* object, SDK::AActor* itemActor);
+
         // Tablet discovery shared state (implemented below; declared here so hooks can call it).
         static std::mutex& TabletMutexRef();
         static std::string& LastHolsteredActorRef();
@@ -1002,17 +1033,66 @@ namespace Mod
             (void)function;
             (void)originalFn;
 
+            // DIAGNOSTIC: Log every call to see if this hook fires at all
+            static int callCount = 0;
+            if (callCount < 10)
+            {
+                ++callCount;
+                LOG_INFO("[AutoMag][DIAG] Hook_SetHolsteredActor called #" << callCount
+                         << " object=" << (object ? object->GetName() : "<null>")
+                         << " class=" << (object && object->Class ? object->Class->GetName() : "<null-class>"));
+            }
+
             if (!object || !parms)
                 return false;
 
+            auto* params = reinterpret_cast<SetHolsteredActorParams*>(parms);
+
+            // ---- AutoMag: refill magazines placed in body pouches ----
+            // SetHolsteredActor fires on URadiusHolsterComponent for ALL holster
+            // types including body pouches (native holsters without BPC_ layer),
+            // weapon magazine slots (BPC_RadiusMagazineSlot_C), hand holsters, etc.
+            // AutoMag_ProcessHolster handles classification and filtering.
+            if (HookManager::Get().IsAutoMagEnabled())
+            {
+                if (!params->ActorToHolster)
+                {
+                    static int nullActorLogs = 0;
+                    if (nullActorLogs < 5)
+                    {
+                        ++nullActorLogs;
+                        LOG_INFO("[AutoMag][DIAG] SetHolsteredActor: ActorToHolster is NULL");
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        AutoMag_ProcessHolster(object, params->ActorToHolster);
+                    }
+                    catch (...)
+                    {
+                        LOG_ERROR("[AutoMag] EXCEPTION in AutoMag_ProcessHolster - prevented crash");
+                    }
+                }
+            }
+            else
+            {
+                static int disabledLogs = 0;
+                if (disabledLogs < 3)
+                {
+                    ++disabledLogs;
+                    LOG_INFO("[AutoMag][DIAG] SetHolsteredActor: AutoMag is DISABLED");
+                }
+            }
+
+            // ---- Existing tablet diagnostic logic ----
             if (!object->IsA(SDK::UBPC_AutoReturnHolster_C::StaticClass()))
                 return false;
 
             auto* holster = static_cast<SDK::UBPC_AutoReturnHolster_C*>(object);
-            auto* params = reinterpret_cast<SetHolsteredActorParams*>(parms);
 
-            // Persist the most recent holstered actor so TCP commands can query it and
-            // tracing can be scoped by object name/class in a single VR test cycle.
+            // Persist the most recent holstered actor so TCP commands can query it.
             if (params->ActorToHolster)
             {
                 const std::string actorFull = params->ActorToHolster->GetFullName();
@@ -1037,6 +1117,77 @@ namespace Mod
             }
 
             return false; // Never override; diagnostic only.
+        }
+
+        // Hook: PutItemToContainer (IItemContainerInterface)
+        // This is what BODY POUCHES actually use - the container system, not SetHolsteredActor.
+        bool Hook_PutItemToContainer(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)function;
+
+            // DIAGNOSTIC: Log every call
+            static int callCount = 0;
+            if (callCount < 10)
+            {
+                ++callCount;
+                LOG_INFO("[AutoMag][DIAG] Hook_PutItemToContainer called #" << callCount
+                         << " object=" << (object ? object->GetName() : "<null>")
+                         << " class=" << (object && object->Class ? object->Class->GetName() : "<null-class>"));
+            }
+
+            if (!object || !parms || !originalFn)
+                return false;
+
+            auto* params = reinterpret_cast<PutItemToContainerParams*>(parms);
+
+            // Modify magazine BEFORE calling original, so container reads the filled state
+            if (HookManager::Get().IsAutoMagEnabled() && params->ItemActor)
+            {
+                try
+                {
+                    AutoMag_ProcessContainer(object, params->ItemActor);
+                }
+                catch (...)
+                {
+                    LOG_ERROR("[AutoMag] EXCEPTION in AutoMag_ProcessContainer - prevented crash");
+                }
+            }
+
+            // NOW call original to place the modified magazine
+            originalFn(object, function, parms);
+
+            return true; // Suppress default invocation (we already called original)
+        }
+
+        // DIAGNOSTIC: Monitor ALL ProcessEvent calls on magazine and container actors
+        static void AutoMag_DiagnosticMonitor(SDK::UObject* object, SDK::UFunction* function)
+        {
+            if (!HookManager::Get().IsAutoMagEnabled())
+                return;
+
+            static int logCount = 0;
+            if (logCount >= 50) // Limit to avoid spam
+                return;
+
+            if (!object || !function)
+                return;
+
+            const std::string objName = object->GetName();
+            const std::string className = object->Class ? object->Class->GetName() : "";
+            const std::string funcName = function->GetName();
+
+            // Log if this is a magazine actor or container-related object
+            if (objName.find("Magazine") != std::string::npos ||
+                objName.find("MagPouch") != std::string::npos ||
+                className.find("Magazine") != std::string::npos ||
+                className.find("Container") != std::string::npos ||
+                className.find("Holster") != std::string::npos)
+            {
+                ++logCount;
+                LOG_INFO("[AutoMag][DIAG][ProcessEvent] obj=" << objName 
+                         << " class=" << className 
+                         << " func=" << funcName);
+            }
         }
 
         static void TabletInteraction_Record(const std::string& summary)
@@ -1155,6 +1306,668 @@ namespace Mod
             return s;
         }
 
+        // -----------------------------------------------------------------
+        // AutoMag: when a magazine is placed in a mag pouch, refill ammo.
+        // Hooks SetHolsteredActor on URadiusHolsterComponent, which fires for
+        // ALL holster types (body pouches, weapon mag slots, hands, etc.).
+        // Body pouch holsters are native URadiusHolsterComponent instances
+        // without a BPC_ layer. OnItemHolsterAttachChanged_Event only fires
+        // on BPC_ItemHolster_C subclasses, so it MISSES body pouches entirely.
+        //
+        // Param layout (from IntoTheRadius2_parameters.hpp):
+        //   0x00 ARadiusGrippableActorBase* ActorToHolster
+        //
+        // Strategy:
+        //  1. Check autoMag enabled + ActorToHolster non-null.
+        //  2. Skip weapon mag slots (UBPC_RadiusMagazineSlot_C) - causes crash.
+        //  3. Skip hand holsters (UBPC_PlayerCharacterHandHolster_C) - spam.
+        //  4. Check item tag contains "Item.Magazine".
+        //  5. Get URadiusItemDynamicData via DataComponent weak ptr.
+        //  6. Determine ammo tag from existing stack or static data.
+        //  7. Determine capacity from static data or known-capacity table.
+        //  8. Fill StackedItems.Items TArray to capacity.
+        //  9. Wrap ALL of this in try/catch - crashes are unacceptable.
+        // -----------------------------------------------------------------
+
+        // Helper: Get URadiusItemDynamicData from an ARadiusItemBase actor.
+        // ARadiusItemBase::DataComponent is at offset 0x05F0.
+        // URadiusDataComponent::ItemDynamicDataPtr (TWeakObjectPtr) is at offset 0x0430.
+        static SDK::URadiusItemDynamicData* GetDynamicDataFromActor(SDK::AActor* actor)
+        {
+            if (!actor) return nullptr;
+
+            // Check it's actually a RadiusItemBase (or derived).
+            if (!actor->IsA(SDK::ARadiusItemBase::StaticClass()))
+                return nullptr;
+
+            auto* itemBase = static_cast<SDK::ARadiusItemBase*>(actor);
+            SDK::URadiusDataComponent* dataComp = itemBase->DataComponent;
+            if (!dataComp) return nullptr;
+
+            // ItemDynamicDataPtr is a TWeakObjectPtr<URadiusItemDynamicData> at 0x0430.
+            // TWeakObjectPtr stores {int32 ObjectIndex, int32 ObjectSerialNumber}.
+            // Resolve via GObjects.GetByIndex().
+            struct WeakObjPtrLayout { int32_t ObjectIndex; int32_t ObjectSerialNumber; };
+            auto* raw = reinterpret_cast<const WeakObjPtrLayout*>(&dataComp->ItemDynamicDataPtr);
+
+            if (raw->ObjectIndex < 0) return nullptr;
+
+            SDK::UObject* resolved = SDK::UObject::GObjects->GetByIndex(raw->ObjectIndex);
+            if (!resolved) return nullptr;
+
+            return static_cast<SDK::URadiusItemDynamicData*>(resolved);
+        }
+
+        // Known magazine capacities by tag substring (fallback when GetAmmoContainerStaticData fails).
+        // Ordered most-specific first. Checked via itemTag.find(key).
+        static const std::pair<const char*, int32_t> kKnownMagCapacities[] = {
+            { "PM.Short",             8  },
+            { "PM.Long",              12 },
+            { "Mosin.ArchangelMag10", 10 },
+            { "Mosin.ArchangelMag5",  5  },
+            { "AK-74",                30 },
+            { "AK-103",               30 },
+            { "G36",                  30 },
+            { "SR25",                 20 },
+            { "Saiga",                8  },
+            { "SVD",                  10 },
+            { "VPO",                  10 },
+            { "VSS",                  20 },
+            { "PPSH",                 35 },
+            { "MP5",                  30 },
+            { "Glock",                17 },
+            { "TT",                   8  },
+        };
+
+        // Lookup capacity from the known-capacity table by matching against the item type tag.
+        static int32_t AutoMag_LookupKnownCapacity(const std::string& itemTag)
+        {
+            for (const auto& [key, cap] : kKnownMagCapacities)
+            {
+                if (itemTag.find(key) != std::string::npos)
+                    return cap;
+            }
+            return 0; // Unknown
+        }
+
+        // Helper: fill a magazine's StackedItems directly, then trigger visual update
+        static bool AutoMag_FillMagazine(SDK::AActor* magazineActor, int32_t capacity, SDK::FGameplayTag ammoTag)
+        {
+            if (!magazineActor || capacity <= 0) 
+            {
+                LOG_ERROR("[AutoMag][Fill] Invalid params: actor=" << (void*)magazineActor << " capacity=" << capacity);
+                return false;
+            }
+
+            SDK::URadiusItemDynamicData* dynData = GetDynamicDataFromActor(magazineActor);
+            if (!dynData)
+            {
+                LOG_ERROR("[AutoMag][Fill] No DynamicData on magazine");
+                return false;
+            }
+
+            // StackedItems at offset 0x0150
+            struct TArrayLayout
+            {
+                SDK::FStackedItem* Data;
+                int32_t NumElements;
+                int32_t MaxElements;
+            };
+
+            uint8_t* dynBase = reinterpret_cast<uint8_t*>(dynData);
+            TArrayLayout* stackedArr = reinterpret_cast<TArrayLayout*>(dynBase + 0x0150);
+
+            const int32_t currentCount = stackedArr->NumElements;
+            const int32_t maxElements = stackedArr->MaxElements;
+            
+            LOG_INFO("[AutoMag][Fill] Current=" << currentCount 
+                     << " Max=" << maxElements
+                     << " Target=" << capacity);
+            
+            if (currentCount >= capacity)
+            {
+                LOG_INFO("[AutoMag][Fill] Already at capacity");
+                return false;
+            }
+
+            // Don't reallocate - just fill what we have space for
+            int32_t fillTo = (maxElements < capacity) ? maxElements : capacity;
+            
+            if (!stackedArr->Data && fillTo > 0)
+            {
+                LOG_ERROR("[AutoMag][Fill] Data pointer is NULL but need to fill");
+                return false;
+            }
+
+            // Fill from current to fillTo
+            for (int32_t i = currentCount; i < fillTo; ++i)
+            {
+                stackedArr->Data[i].ItemTag = ammoTag;
+                stackedArr->Data[i].bIsShell = false;
+            }
+            stackedArr->NumElements = fillTo;
+
+            LOG_INFO("[AutoMag][Fill] Filled from " << currentCount << " to " << fillTo);
+
+            // Get stack component and trigger visual update
+            SDK::URadiusItemStackComponent* stackComp = nullptr;
+            {
+                ScopedProcessEventGuard guard;
+                stackComp = static_cast<SDK::URadiusItemStackComponent*>(
+                    magazineActor->GetComponentByClass(SDK::URadiusItemStackComponent::StaticClass()));
+            }
+
+            if (stackComp)
+            {
+                // FireOnStackChanged triggers the visual update
+                try
+                {
+                    ScopedProcessEventGuard guard;
+                    stackComp->FireOnStackChanged();
+                    LOG_INFO("[AutoMag][Fill] Triggered visual update via FireOnStackChanged");
+                }
+                catch (...)
+                {
+                    LOG_WARN("[AutoMag][Fill] Exception calling FireOnStackChanged");
+                }
+            }
+            else
+            {
+                LOG_WARN("[AutoMag][Fill] No stack component found, visual update may not occur");
+            }
+
+            return true;
+        }
+
+        // Core automag processing. Called from Hook_SetHolsteredActor.
+        // object = URadiusHolsterComponent* (the holster the item is being placed into)
+        // actorToHolster = the item actor being placed
+        static void AutoMag_ProcessHolster(SDK::UObject* object, SDK::ARadiusGrippableActorBase* actorToHolster)
+        {
+            // ---- Classify holster: skip weapon mag slots and hand holsters ----
+            // Weapon mag slots (BPC_RadiusMagazineSlot_C) caused crashes previously.
+            // Hand holsters would trigger on every pickup which is noisy.
+            const std::string holsterClass = object->Class ? object->Class->GetName() : "<null-class>";
+            const std::string holsterName  = object->GetName();
+
+            // Get the owner actor of this holster component for context.
+            SDK::AActor* holsterOwner = nullptr;
+            if (object->IsA(SDK::UActorComponent::StaticClass()))
+                holsterOwner = static_cast<SDK::UActorComponent*>(object)->GetOwner();
+            const std::string ownerName = holsterOwner ? holsterOwner->GetName() : "<null-owner>";
+
+            // SKIP: weapon magazine slots - inserting mag into gun. Known crash source.
+            if (object->IsA(SDK::UBPC_RadiusMagazineSlot_C::StaticClass()))
+            {
+                LOG_INFO("[AutoMag] SKIP weapon mag slot: " << holsterClass << " on " << ownerName);
+                return;
+            }
+            // SKIP: hand holsters - picking up a magazine.
+            if (object->IsA(SDK::UBPC_PlayerCharacterHandHolster_C::StaticClass()))
+                return;
+            // SKIP: mouth slot.
+            if (object->IsA(SDK::UBPC_MouthSlot_C::StaticClass()))
+                return;
+
+            // ---- Get item dynamic data ----
+            auto* itemActor = static_cast<SDK::AActor*>(actorToHolster);
+            SDK::URadiusItemDynamicData* dynData = GetDynamicDataFromActor(itemActor);
+            if (!dynData)
+            {
+                static int failLogs = 0;
+                if (failLogs < 30)
+                {
+                    ++failLogs;
+                    LOG_INFO("[AutoMag] No dynamic data for actor: " << itemActor->GetName()
+                             << " in holster: " << holsterClass << " (" << holsterName << ") on " << ownerName);
+                }
+                return;
+            }
+
+            const std::string itemTag = dynData->ItemType.TagName.ToString();
+
+            // ---- Item must be a magazine ----
+            if (itemTag.find("Item.Magazine") == std::string::npos)
+                return;  // Not a magazine, silently skip.
+
+            LOG_INFO("[AutoMag] Magazine " << itemTag << " placed in holster: "
+                     << holsterClass << " (" << holsterName << ") on owner: " << ownerName);
+
+            // ---- Get existing ammo tag from current stacked items ----
+            SDK::FGameplayTag ammoTag{};
+            bool hasAmmoTag = false;
+            {
+                // Read StackedItems directly from raw offset (avoids ProcessEvent).
+                struct TArrayLayout {
+                    SDK::FStackedItem* Data;
+                    int32_t NumElements;
+                    int32_t MaxElements;
+                };
+                uint8_t* dynBase = reinterpret_cast<uint8_t*>(dynData);
+                auto* stackedArr = reinterpret_cast<const TArrayLayout*>(dynBase + 0x0150);
+                if (stackedArr->Data && stackedArr->NumElements > 0)
+                {
+                    ammoTag = stackedArr->Data[0].ItemTag;
+                    hasAmmoTag = true;
+                    LOG_INFO("[AutoMag] Existing ammo tag from stack (" << stackedArr->NumElements
+                             << " rounds): " << ammoTag.TagName.ToString());
+                }
+                else
+                {
+                    LOG_INFO("[AutoMag] Magazine is empty (NumElements=" << stackedArr->NumElements << ")");
+                }
+            }
+
+            // ---- Get magazine capacity ----
+            int32_t capacity = 0;
+
+            // Method 1: Try GetAmmoContainerStaticData via ProcessEvent on DataComponent.
+            {
+                ScopedProcessEventGuard guard;
+                auto* itemBase = static_cast<SDK::ARadiusItemBase*>(itemActor);
+                if (itemBase->DataComponent)
+                {
+                    SDK::UFunction* getAmmoFn = nullptr;
+                    try
+                    {
+                        getAmmoFn = itemBase->DataComponent->Class->GetFunction(
+                            "RadiusDataComponentInterface", "GetAmmoContainerStaticData");
+                    }
+                    catch (...) { getAmmoFn = nullptr; }
+
+                    if (getAmmoFn)
+                    {
+                        // Params layout (0x01E8): { FAmmoContainerStaticData @0; bool ReturnValue @0x01E0; pad[7] }
+                        struct GetAmmoContainerParams
+                        {
+                            SDK::FAmmoContainerStaticData OutData;  // 0x0000 (0x01E0)
+                            bool ReturnValue;                       // 0x01E0 (0x0001)
+                            uint8_t Pad[0x7];                       // 0x01E1 (0x0007)
+                        };
+                        GetAmmoContainerParams gp{};
+
+                        try
+                        {
+                            auto flgs = getAmmoFn->FunctionFlags;
+                            getAmmoFn->FunctionFlags |= 0x400; // FUNC_Native
+                            itemBase->DataComponent->ProcessEvent(getAmmoFn, &gp);
+                            getAmmoFn->FunctionFlags = flgs;
+                        }
+                        catch (...)
+                        {
+                            gp.ReturnValue = false;
+                            LOG_WARN("[AutoMag] ProcessEvent GetAmmoContainerStaticData threw");
+                        }
+
+                        if (gp.ReturnValue)
+                        {
+                            capacity = gp.OutData.Parameters.HolderCapacity;
+                            LOG_INFO("[AutoMag] StaticData: HolderCapacity=" << capacity
+                                     << "  ChamberCapacity=" << gp.OutData.Parameters.ChamberCapacity);
+
+                            if (!hasAmmoTag)
+                            {
+                                struct TArrayTagLayout { SDK::FGameplayTag* Data; int32_t Num; int32_t Max; };
+                                auto* raw = reinterpret_cast<const TArrayTagLayout*>(&gp.OutData.Parameters.AcceptedAmmoTypes);
+                                if (raw->Data && raw->Num > 0)
+                                {
+                                    ammoTag = raw->Data[0];
+                                    hasAmmoTag = true;
+                                    LOG_INFO("[AutoMag] Ammo tag from AcceptedAmmoTypes: " << ammoTag.TagName.ToString());
+                                }
+                            }
+                        }
+                        else
+                        {
+                            LOG_INFO("[AutoMag] GetAmmoContainerStaticData returned false for " << itemTag);
+                        }
+                    }
+                    else
+                    {
+                        LOG_INFO("[AutoMag] GetAmmoContainerStaticData UFunction not found on DataComponent class: "
+                                 << (itemBase->DataComponent->Class ? itemBase->DataComponent->Class->GetName() : "<null>"));
+                    }
+                }
+            }
+
+            // Method 2: Known-capacity lookup table (by magazine tag substring).
+            if (capacity <= 0)
+            {
+                capacity = AutoMag_LookupKnownCapacity(itemTag);
+                if (capacity > 0)
+                {
+                    LOG_INFO("[AutoMag] Capacity from known-mag table: " << capacity << " for " << itemTag);
+                }
+            }
+
+            // Method 3: Try parsing a number from the end of the tag (e.g. "G36.30" -> 30).
+            if (capacity <= 0)
+            {
+                size_t lastDot = itemTag.rfind('.');
+                if (lastDot != std::string::npos)
+                {
+                    try { capacity = std::stoi(itemTag.substr(lastDot + 1)); }
+                    catch (...) { capacity = 0; }
+                }
+                if (capacity > 0)
+                    LOG_INFO("[AutoMag] Capacity parsed from tag suffix: " << capacity);
+            }
+
+            // Method 4: Ultimate fallback.
+            if (capacity <= 0)
+            {
+                capacity = 30;
+                LOG_WARN("[AutoMag] Using fallback capacity of " << capacity << " for " << itemTag);
+            }
+
+            if (!hasAmmoTag)
+            {
+                LOG_ERROR("[AutoMag] No ammo tag available for " << itemTag << " - cannot refill");
+                return;
+            }
+
+            // ---- Do the actual refill ----
+            bool refilled = AutoMag_FillMagazine(itemActor, capacity, ammoTag);
+
+            if (refilled)
+            {
+                Mod::ModFeedback::ShowMessage(
+                    L"[AutoMag] Magazine refilled!", 2.0f,
+                    SDK::FLinearColor{0.2f, 1.0f, 0.6f, 1.0f});
+            }
+        }
+
+        // AutoMag_ProcessContainer: handles magazines placed via the container system (body pouches).
+        // object = the container object (UObject implementing IItemContainerInterface)
+        // itemActor = the item being placed
+        static void AutoMag_ProcessContainer(SDK::UObject* object, SDK::AActor* itemActor)
+        {
+            const std::string containerClass = object->Class ? object->Class->GetName() : "<null-class>";
+            const std::string containerName  = object->GetName();
+
+            // CRITICAL: Exclude weapon magazine slots to prevent crashes
+            if (containerClass.find("BPC_RadiusMagazineSlot_C") != std::string::npos)
+            {
+                return;
+            }
+
+            // Get item dynamic data
+            SDK::URadiusItemDynamicData* dynData = GetDynamicDataFromActor(itemActor);
+            if (!dynData)
+            {
+                return;
+            }
+
+            const std::string itemTag = dynData->ItemType.TagName.ToString();
+
+            // Item must be a magazine
+            if (itemTag.find("Item.Magazine") == std::string::npos)
+            {
+                return;  // Not a magazine
+            }
+
+            // Check if container is a mag pouch
+            // Use class-based check for inventory slots that hold magazines
+            const bool isMagPouch = 
+                (containerClass.find("BPC_InvSlot_") != std::string::npos && containerClass.find("Magazine") != std::string::npos) ||
+                (containerName.find("MagPouch") != std::string::npos);
+
+            if (!isMagPouch)
+            {
+                return;
+            }
+
+            // Get existing ammo tag from current stacked items
+            SDK::FGameplayTag ammoTag{};
+            bool hasAmmoTag = false;
+            int32_t currentAmmo = 0;
+            {
+                struct TArrayLayout {
+                    SDK::FStackedItem* Data;
+                    int32_t NumElements;
+                    int32_t MaxElements;
+                };
+                uint8_t* dynBase = reinterpret_cast<uint8_t*>(dynData);
+                auto* stackedArr = reinterpret_cast<const TArrayLayout*>(dynBase + 0x0150);
+                if (stackedArr->Data && stackedArr->NumElements > 0)
+                {
+                    ammoTag = stackedArr->Data[0].ItemTag;
+                    hasAmmoTag = true;
+                    currentAmmo = stackedArr->NumElements;
+                }
+                else
+                {
+                }
+            }
+
+            // Get capacity AND ammo tag from static data
+            int32_t capacity = 0;
+            {
+                ScopedProcessEventGuard guard;
+                auto* itemBase = static_cast<SDK::ARadiusItemBase*>(itemActor);
+                if (itemBase->DataComponent)
+                {
+                    SDK::UFunction* getAmmoFn = nullptr;
+                    try { getAmmoFn = itemBase->DataComponent->Class->GetFunction("RadiusDataComponentInterface", "GetAmmoContainerStaticData"); }
+                    catch (...) { getAmmoFn = nullptr; }
+
+                    if (getAmmoFn)
+                    {
+                        struct GetAmmoContainerParams { SDK::FAmmoContainerStaticData OutData; bool ReturnValue; uint8_t Pad[0x7]; };
+                        GetAmmoContainerParams gp{};
+                        try
+                        {
+                            auto flgs = getAmmoFn->FunctionFlags;
+                            getAmmoFn->FunctionFlags |= 0x400;
+                            itemBase->DataComponent->ProcessEvent(getAmmoFn, &gp);
+                            getAmmoFn->FunctionFlags = flgs;
+                        }
+                        catch (...) { gp.ReturnValue = false; }
+
+                        if (gp.ReturnValue)
+                        {
+                            capacity = gp.OutData.Parameters.HolderCapacity;
+                            
+                            // ALWAYS try to get ammo tag from AcceptedAmmoTypes (especially for empty mags)
+                            struct TArrayTagLayout { SDK::FGameplayTag* Data; int32_t Num; int32_t Max; };
+                            auto* raw = reinterpret_cast<const TArrayTagLayout*>(&gp.OutData.Parameters.AcceptedAmmoTypes);
+                            if (raw->Data && raw->Num > 0)
+                            {
+                                if (!hasAmmoTag)
+                                {
+                                    ammoTag = raw->Data[0];
+                                    hasAmmoTag = true;
+                                }
+                                else
+                                {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (capacity <= 0)
+            {
+                capacity = AutoMag_LookupKnownCapacity(itemTag);
+                // if (capacity > 0)
+                //     LOG_INFO("[AutoMag][Container] Capacity from lookup table: " << capacity);
+            }
+
+            if (capacity <= 0)
+            {
+                size_t lastDot = itemTag.rfind('.');
+                if (lastDot != std::string::npos)
+                {
+                    try { capacity = std::stoi(itemTag.substr(lastDot + 1)); }
+                    catch (...) { capacity = 0; }
+                }
+                // if (capacity > 0)
+                //     LOG_INFO("[AutoMag][Container] Capacity from tag suffix: " << capacity);
+            }
+
+            if (capacity <= 0)
+            {
+                capacity = 30;
+            }
+
+            // Fallback ammo tag mapping if static data lookup failed
+            if (!hasAmmoTag)
+            {
+                
+                // Common magazine -> ammo type mappings
+                if (itemTag.find("PM.Short") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.9x18.FMJ")};
+                else if (itemTag.find("FORT17") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.9x19.FMJ")};
+                else if (itemTag.find("AK-74") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.5-45x39.FMJ")};
+                else if (itemTag.find("AKM") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.7-62x39.FMJ")};
+                else if (itemTag.find("G36") != std::string::npos || itemTag.find("M4A1") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.5-56x45.FMJ")};
+                else if (itemTag.find("SR25") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.7-62x51.FMJ")};
+                else if (itemTag.find("VSS") != std::string::npos || itemTag.find("Vintorez") != std::string::npos)
+                    ammoTag = SDK::FGameplayTag{SDK::UKismetStringLibrary::Conv_StringToName(L"Item.Ammo.9x39.SP5")};
+                else
+                {
+                    return;
+                }
+                
+                hasAmmoTag = true;
+            }
+
+            // Fill magazine
+            bool refilled = AutoMag_FillMagazine(itemActor, capacity, ammoTag);
+            if (refilled)
+            {
+                Mod::ModFeedback::ShowMessage(
+                    L"[AutoMag] Magazine refilled!", 2.0f,
+                    SDK::FLinearColor{0.2f, 1.0f, 0.6f, 1.0f});
+            }
+            else
+            {
+            }
+        }
+
+        // =================================================================
+        // VR Menu Input Hooks
+        // =================================================================
+        // These intercept VR controller input events dispatched through
+        // ProcessEvent on the player character. When the VR menu is open,
+        // the movement/trigger hooks return true to suppress game input.
+        //
+        // FInputActionValue layout (0x20 bytes, opaque):
+        //   For buttons: first 4 bytes are a float (0.0 or 1.0)
+        //   For 2D axis: first 8 bytes are two floats (X, Y)
+        //   We log raw bytes on first intercept to verify.
+        // =================================================================
+
+        // Helper: dump first N bytes of FInputActionValue for diagnostics
+        static void LogInputActionValueBytes(const char* hookName, const void* parms)
+        {
+            static int logCount = 0;
+            if (logCount >= 10) return;  // Only log a few times
+            ++logCount;
+
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(parms);
+            std::ostringstream oss;
+            oss << "[VRMenu:Input] " << hookName << " raw bytes[0..31]: ";
+            for (int i = 0; i < 32; ++i)
+            {
+                oss << std::hex << std::setw(2) << std::setfill('0') << (int)bytes[i];
+                if (i < 31) oss << " ";
+            }
+            // Also interpret as floats
+            const float* asFloat = reinterpret_cast<const float*>(parms);
+            oss << "  floats[0..3]: " << std::dec;
+            for (int i = 0; i < 4; ++i)
+            {
+                oss << asFloat[i];
+                if (i < 3) oss << ", ";
+            }
+            LOG_INFO(oss.str());
+        }
+
+        // Toggle menu: Left Y/B button (IA_Button2_Left)
+        // _17 = Started, _18 = Completed. We act on Started only.
+        bool Hook_VRMenu_ToggleButton(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            if (!object || !function || !parms)
+                return false;
+
+            // Only act on _17 (Started trigger), not _18 (Completed)
+            const std::string fnName = function->GetName();
+            if (fnName.find("_17") == std::string::npos)
+                return false;
+
+            LogInputActionValueBytes("ToggleButton", parms);
+
+            auto* menu = Mod::VRMenuSubsystem::Get();
+            if (menu)
+            {
+                menu->OnToggleMenu();
+                LOG_INFO("[VRMenu:Input] Toggle button pressed (Started). Menu is now: " 
+                         << (menu->IsMenuOpen() ? "OPEN" : "CLOSED"));
+            }
+
+            return false;  // Don't suppress the Y/B button from the game
+        }
+
+        // Navigation: Left thumbstick (IA_Movement)
+        // _0 = Started, _1 = Triggered (continuous). We want _1 for ongoing stick input.
+        // When menu is open, we read Y axis for up/down and suppress game movement.
+        bool Hook_VRMenu_Movement(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            if (!object || !function || !parms)
+                return false;
+
+            auto* menu = Mod::VRMenuSubsystem::Get();
+            if (!menu || !menu->IsMenuOpen())
+                return false;  // Menu closed — let game handle movement normally
+
+            // Log raw bytes for the first few intercepts to diagnose layout
+            LogInputActionValueBytes("Movement", parms);
+
+            // FInputActionValue is at offset 0 in the params struct.
+            // For a 2D axis: interpret first 8 bytes as two floats (X, Y).
+            const float* axisValues = reinterpret_cast<const float*>(parms);
+            float thumbstickY = axisValues[1];  // Y axis = forward/back = up/down in menu
+
+            menu->OnNavigate(thumbstickY);
+
+            return true;  // SUPPRESS game movement while menu is open
+        }
+
+        // Select: Left trigger (IA_Trigger_Left)
+        // When menu is open, execute the selected item.
+        bool Hook_VRMenu_TriggerLeft(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            if (!object || !function || !parms)
+                return false;
+
+            auto* menu = Mod::VRMenuSubsystem::Get();
+            if (!menu || !menu->IsMenuOpen())
+                return false;  // Menu closed — let game handle trigger normally
+
+            LogInputActionValueBytes("TriggerLeft", parms);
+
+            // For trigger: first float is the analog value (0.0 to 1.0).
+            // Only select on a firm press.
+            const float* triggerValue = reinterpret_cast<const float*>(parms);
+            if (triggerValue[0] > 0.5f)
+            {
+                menu->OnSelect();
+                LOG_INFO("[VRMenu:Input] Trigger pressed (value=" << triggerValue[0] << "), executing selected item");
+            }
+
+            return true;  // SUPPRESS game trigger (no shooting) while menu is open
+        }
+
     } // anonymous namespace
 
     // Static member initialization
@@ -1169,7 +1982,7 @@ namespace Mod
 
     HookManager::HookManager()
         : initialized_(false), processEventHooked_(false), unlimitedAmmoEnabled_(false), durabilityBypassEnabled_(false),
-          hungerDisabled_(false), fatigueDisabled_(false)
+          hungerDisabled_(false), fatigueDisabled_(false), autoMagEnabled_(false)
     {
     }
 
@@ -1388,6 +2201,21 @@ namespace Mod
         // Notification discovery (trace-gated; helps identify the "safety is on" path)
         namedHooks_["ShowSubtitles"] = &Hook_LogShowSubtitles;
         namedHooks_["ShowMessage"] = &Hook_LogShowMessage;
+
+        // AutoMag: SetHolsteredActor (holster components) + PutItemToContainer (body pouches)
+        namedHooks_["PutItemToContainer"] = &Hook_PutItemToContainer;
+
+        // VR Menu input hooks
+        // Left Y/B button: toggle menu open/close (two variants: _17=Started, _18=Completed)
+        namedHooks_["InpActEvt_IA_Button2_Left_K2Node_EnhancedInputActionEvent_17"] = &Hook_VRMenu_ToggleButton;
+        namedHooks_["InpActEvt_IA_Button2_Left_K2Node_EnhancedInputActionEvent_18"] = &Hook_VRMenu_ToggleButton;
+        // Left thumbstick: navigate menu up/down when open (_0=Started, _1=Triggered/continuous)
+        namedHooks_["InpActEvt_IA_Movement_K2Node_EnhancedInputActionEvent_0"] = &Hook_VRMenu_Movement;
+        namedHooks_["InpActEvt_IA_Movement_K2Node_EnhancedInputActionEvent_1"] = &Hook_VRMenu_Movement;
+        // Left trigger: select menu item when open
+        namedHooks_["InpActEvt_IA_Trigger_Left_K2Node_EnhancedInputActionEvent_24"] = &Hook_VRMenu_TriggerLeft;
+
+        LOG_INFO("[HookManager] VR Menu input hooks registered (5 events)");
 
         // Build snapshot for lock-free ProcessEvent dispatch
         namedHooksSnapshot_ = namedHooks_;
@@ -1617,6 +2445,18 @@ namespace Mod
         LOG_INFO("[HookManager] Fatigue disabled " << (disabled ? "enabled" : "disabled"));
     }
 
+    void HookManager::SetAutoMagEnabled(bool enabled)
+    {
+        autoMagEnabled_ = enabled;
+
+        if (enabled && initialized_ && !processEventHooked_)
+        {
+            InstallProcessEventHook();
+        }
+
+        LOG_INFO("[HookManager] AutoMag " << (enabled ? "enabled" : "disabled"));
+    }
+
     void HookManager::Hook_ProcessEvent(SDK::UObject *pThis, SDK::UFunction *function, void *parms)
     {
         ProcessEventFn originalFn = nullptr;
@@ -1651,6 +2491,8 @@ namespace Mod
         if (!gProcessEventReentryGuard)
         {
             TraceOnProcessEvent(pThis, function);
+            // AutoMag diagnostic monitor: log ALL magazine/container/holster related ProcessEvents
+            //AutoMag_DiagnosticMonitor(pThis, function);
         }
 
         if (gProcessEventReentryGuard)

@@ -75,6 +75,9 @@
     <ClInclude Include="Mod\SpatialAudio.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Mod\VRMenuSubsystem.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -107,6 +110,9 @@
     <ClCompile Include="Mod\SpatialAudio.cpp">
       <Filter>Source Files\Mod</Filter>
     </ClCompile>
+    <ClCompile Include="Mod\VRMenuSubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
+    </ClCompile>
     <ClCompile Include="Mod\ModMain.cpp">
       <Filter>Source Files\Mod</Filter>
     </ClCompile>
@@ -135,6 +141,9 @@
       <Filter>Source Files\SDK</Filter>
     </ClCompile>
     <ClCompile Include="CppSDK\SDK\VRExpansionPlugin_functions.cpp">
+      <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\UMG_functions.cpp">
       <Filter>Source Files\SDK</Filter>
     </ClCompile>
     <ClCompile Include="CppSDK\SDK\MediaAssets_functions.cpp">

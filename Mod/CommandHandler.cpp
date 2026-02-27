@@ -620,7 +620,9 @@ namespace Mod
             if (args.empty())
             {
                 std::ostringstream oss;
-                oss << "lights: current scale=" << g_Cheats.GetPortableLightIntensityScale() << " (usage: lights <scale>)";
+                oss << "lights: current scale=" << g_Cheats.GetPortableLightIntensityScale()
+                    << ", fadeScale=" << g_Cheats.GetPortableLightFadeDistanceScale()
+                    << " (usage: lights <scale> [fadeScale])";
                 return oss.str();
             }
 
@@ -629,12 +631,40 @@ namespace Mod
             catch (...) { return "Invalid scale value: " + args[0]; }
 
             g_Cheats.SetPortableLightIntensityScale(scale);
+
+            if (args.size() >= 2)
+            {
+                float fadeScale = 1.0f;
+                try { fadeScale = std::stof(args[1]); }
+                catch (...) { return "Invalid fadeScale value: " + args[1]; }
+                g_Cheats.SetPortableLightFadeDistanceScale(fadeScale);
+            }
+
             std::ostringstream oss;
-            oss << "lights: set scale=" << g_Cheats.GetPortableLightIntensityScale();
+            oss << "lights: set scale=" << g_Cheats.GetPortableLightIntensityScale()
+                << ", fadeScale=" << g_Cheats.GetPortableLightFadeDistanceScale();
             return oss.str();
         });
 
+        // Test to call multiple cheat toggles at once to set up a specific state
+        Register("test", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            (void)args;
+            g_Cheats.SetGodMode(true);
+            g_Cheats.SetUnlimitedAmmo(true);
+            g_Cheats.SetHungerDisabled(true);
+            g_Cheats.SetFatigueDisabled(true);
+            g_Cheats.ToggleAnomaliesDisabled(); // replace this when we have a set command for anomalies.
+            Mod::Friend::FriendSubsystem::Get()->SpawnFriend(world);
+            g_Cheats.SetPortableLightIntensityScale(10.0f);
+            return "Test setup applied: godmode, unlimited ammo, hunger/fatigue disabled, anomalies disabled, friend spawned, portable light scale set to 10" ;
+        });
 
+
+
+
+        // Access level: for testing content gated behind access levels without needing to meet requirements in-game.
         Register("access", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
                  {
             (void)world;
@@ -763,6 +793,38 @@ namespace Mod
             const int count = Mod::Friend::FriendSubsystem::Get()->ActiveFriendCount();
             return std::string("Active friends: ") + std::to_string(count)
                 + " / " + std::to_string(Mod::Tuning::kFriendMaxCount);
+        });
+
+        // -----------------------------------------------------------------
+        // Anomaly disable cheat
+        // -----------------------------------------------------------------
+        Register("anomalies", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            g_Cheats.ToggleAnomaliesDisabled();
+            return g_Cheats.GetStatus();
+        });
+
+        // -----------------------------------------------------------------
+        // AutoMag: magazines placed in mag pouches auto-refill
+        // -----------------------------------------------------------------
+        Register("automag", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            (void)args;
+            g_Cheats.ToggleAutoMag();
+            return g_Cheats.GetStatus();
+        });
+
+        // -----------------------------------------------------------------
+        // Heal item (spawn QuickHeal near player)
+        // -----------------------------------------------------------------
+        Register("heal", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            if (!world)
+                return "heal: world not ready";
+            return g_Cheats.SpawnHealItem(world);
         });
     }
 

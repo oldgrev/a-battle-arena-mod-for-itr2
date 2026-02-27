@@ -47,6 +47,7 @@ namespace Mod
 
         // Toggle bullet time on/off
         void ToggleBulletTime();
+        bool IsBulletTimeActive() const { return bulletTimeActive_.load(std::memory_order_relaxed); }
 
         // Set bullet time scale (e.g. 0.2 for 5x slow mo)
         void SetBulletTimeScale(float scale);
@@ -73,6 +74,25 @@ namespace Mod
         // 1.0 = default game brightness
         void SetPortableLightIntensityScale(float scale);
         float GetPortableLightIntensityScale() const;
+
+        // Scale light-function fade distance for portable lights
+        // 1.0 = default game fade distance
+        void SetPortableLightFadeDistanceScale(float scale);
+        float GetPortableLightFadeDistanceScale() const;
+
+        // Toggle anomaly spawning disabled -- destroys existing anomalies and stops new ones
+        void ToggleAnomaliesDisabled();
+        bool IsAnomaliesDisabledActive() const;
+        // Apply anomaly suppression each tick (destroys new anomalies if cheat is on)
+        void ApplyAnomalySuppression(SDK::UWorld* world);
+
+        // Toggle automag (magazines placed in mag pouches auto-refill)
+        void ToggleAutoMag();
+        bool IsAutoMagActive() const;
+        void SetAutoMag(bool enabled);
+
+        // Spawn a QuickHeal injector item near the player
+        std::string SpawnHealItem(SDK::UWorld* world);
 
         // Get cheat status as string
         std::string GetStatus() const;
@@ -103,6 +123,8 @@ namespace Mod
         std::atomic<bool> noClipActive_{false};
         std::atomic<bool> jumpAllowedActive_{false};
         std::atomic<bool> debugModeActive_{false};
+        std::atomic<bool> anomaliesDisabled_{false};
+        std::atomic<bool> autoMagActive_{false};
 
         // Counter for periodic durability check (every 600 cycles)
         uint32_t durabilityCheckCounter_{0};
@@ -130,7 +152,9 @@ namespace Mod
 
         // Track original light intensities so scaling is stable (no compounding each tick)
         std::unordered_map<SDK::ULightComponentBase*, float> portableLightOriginalIntensity_;
+        std::unordered_map<SDK::ULightComponentBase*, float> portableLightOriginalFadeDistance_;
         std::atomic<float> portableLightIntensityScale_{1.0f};
+        std::atomic<float> portableLightFadeDistanceScale_{1.0f};
         std::atomic<bool> portableLightScaleDirty_{true};
         SDK::UWorld* lastPortableLightWorld_{nullptr};
 

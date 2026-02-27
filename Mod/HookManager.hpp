@@ -108,6 +108,13 @@ namespace Mod
         void SetFatigueDisabled(bool disabled);
         bool IsFatigueDisabled() const { return fatigueDisabled_; }
 
+        /**
+         * @brief Set whether automag is enabled
+         * When active, magazines placed in mag pouches auto-refill to capacity.
+         */
+        void SetAutoMagEnabled(bool enabled);
+        bool IsAutoMagEnabled() const { return autoMagEnabled_; }
+
         // Reentry guard for when the mod calls SDK functions
         static void SetReentryGuard(bool enabled);
         static bool GetReentryGuard();
@@ -156,6 +163,7 @@ namespace Mod
         std::atomic<bool> durabilityBypassEnabled_;
         std::atomic<bool> hungerDisabled_;
         std::atomic<bool> fatigueDisabled_;
+        std::atomic<bool> autoMagEnabled_;
 
         // One original ProcessEvent pointer for fast fallback/logging
         static ProcessEventFn originalProcessEvent_;

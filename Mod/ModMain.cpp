@@ -53,6 +53,7 @@
 #include "ModFeedback.hpp"
 #include "ModTuning.hpp"
 #include "FriendSubsystem.hpp"
+#include "VRMenuSubsystem.hpp"
 #include "..\CppSDK\SDK.hpp"
 
 
@@ -126,6 +127,10 @@ namespace Mod
 
         // Initialize sound system (scan sounds/ folder if present).
         Mod::ModFeedback::InitSoundSystem();
+
+        // Initialize VR menu subsystem
+        Mod::VRMenuSubsystem::Get()->Initialize();
+        LOG_INFO("[mod] VR Menu subsystem initialized");
 
         // Create command handler with all commands
         CommandHandlerRegistry commandHandler;
@@ -249,6 +254,9 @@ namespace Mod
 
             // Update Friend subsystem
             Mod::Friend::FriendSubsystem::Get()->Update(world);
+
+            // Update VR Menu subsystem (renders menu if open, both approaches)
+            Mod::VRMenuSubsystem::Get()->Update(world);
         }
     }
 }

@@ -48,6 +48,7 @@ namespace Mod::Friend
         // Unstuck detection
         SDK::FVector lastFollowPosition = {0.0f, 0.0f, 0.0f};
         int stuckFollowAttempts = 0;        // consecutive follow attempts with minimal movement
+        float lastFollowCommandTime = -999.0f; // timestamp of last MoveToLocation issued by TickFollow
 
         // Death sequence timing
         float deathTime            = -1.0f;

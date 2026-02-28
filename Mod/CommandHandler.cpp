@@ -26,6 +26,7 @@ Solution: add short aliases and a one-shot "vr_diag" command to enable/disable t
 #include "ModTuning.hpp"
 #include "HookManager.hpp"
 #include "FriendSubsystem.hpp"
+#include "MenuPocSubsystem.hpp"
 
 namespace Mod
 {
@@ -748,6 +749,45 @@ namespace Mod
             Mod::HookManager::Trace_SetEnabled(false);
             return "trace_off: disabled"; });
 
+        // -----------------------------------------------------------------
+        // HUD Trace: dedicated HUD/ItemInfo/Widget discovery trace
+        // Logs EVERYTHING HUD-related with parameter payloads.
+        // Use to discover how the game shows item info on vise, etc.
+        // -----------------------------------------------------------------
+        Register("hud_trace_on", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            Mod::HookManager::HudTrace_SetEnabled(true);
+            return Mod::HookManager::HudTrace_GetStatus(); });
+
+        Register("hud_trace_off", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            Mod::HookManager::HudTrace_SetEnabled(false);
+            return Mod::HookManager::HudTrace_GetStatus(); });
+
+        Register("hud_trace_reset", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            Mod::HookManager::HudTrace_Reset();
+            return Mod::HookManager::HudTrace_GetStatus(); });
+
+        Register("hud_trace_flush", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            Mod::HookManager::HudTrace_Flush();
+            return Mod::HookManager::HudTrace_GetStatus(); });
+
+        Register("hud_trace_status", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::HookManager::HudTrace_GetStatus(); });
+
+        Register("hud_trace_path", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return std::string("HudTrace path: ") + Mod::HookManager::HudTrace_GetFilePath(); });
+
 
         // -----------------------------------------------------------------
         // Loadout commands
@@ -827,6 +867,47 @@ namespace Mod
         //         return "heal: world not ready";
         //     return g_Cheats.SpawnHealItem(world);
         // });
+
+        // -----------------------------------------------------------------
+        // Menu POC commands (poc1-poc6)
+        // -----------------------------------------------------------------
+        Register("poc1", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc1_SwitchIngameMenu();
+        });
+
+        Register("poc2", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc2_AttachWidgetToLeftHand();
+        });
+
+        Register("poc3", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc3_ShowCheatPanel();
+        });
+
+        Register("poc4", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc4_SpawnIngameMenuActor();
+        });
+
+        Register("poc5", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc5_UseInfoPanel();
+        });
+
+        Register("poc6", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc6_SpawnFaceFollowingMenu();
+        });
+
+        LOG_INFO("[Command] Menu POC commands registered (poc1-poc6)");
     }
 
     // Expose cheats update for main loop

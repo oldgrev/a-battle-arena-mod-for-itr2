@@ -132,6 +132,18 @@ namespace Mod
         static std::string Trace_GetFilePath();
 
         // -----------------------------------------------------------------
+        // Diagnostics: HUD-specific trace (dedicated HUD discovery)
+        // Captures EVERYTHING HUD/ItemInfo/Widget related with parameter
+        // payloads. Separate from trace_on to allow focused investigation.
+        // -----------------------------------------------------------------
+        static void HudTrace_SetEnabled(bool enabled);
+        static bool HudTrace_IsEnabled();
+        static void HudTrace_Reset();
+        static void HudTrace_Flush();
+        static std::string HudTrace_GetFilePath();
+        static std::string HudTrace_GetStatus();
+
+        // -----------------------------------------------------------------
         // Diagnostics: Tablet discovery
         // -----------------------------------------------------------------
         static std::string TabletDiag_GetLastHolsteredSummary();

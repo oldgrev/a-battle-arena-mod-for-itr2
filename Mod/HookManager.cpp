@@ -44,6 +44,11 @@
 // - AutoMag capacity: GetAmmoContainerStaticData UFunction not found on some DataComponent classes. The interface function "RadiusDataComponentInterface"
 //   may not be implemented by all DataComponent subclasses.
 //   Fix: add a known-capacity lookup table keyed by magazine tag substrings (PM.Short→8, AK-74→30, etc.) and a tag-suffix parser as fallbacks.
+// - AutoMag fill cap bug: StackedItems.Num/Max can be lower than true magazine capacity (e.g. Num=0 Max=24 for a 30-round mag).
+//   If we only fill up to MaxElements without growing the array, refill silently under-fills. Fix: grow StackedItems with CRT realloc()
+//   to at least target capacity before writing items, then set NumElements to the true fill target.
+// - HUD Trace: when adding large blocks of code in anonymous namespaces that use utility functions like ToLowerCopy(), ensure forward
+//   declarations are added before the usage. The anonymous namespace has strict ordering - functions must be declared before use.
 //
 
 
@@ -63,6 +68,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
@@ -134,6 +140,15 @@ namespace Mod
         static std::atomic<bool> gTabletInteractionDiagEnabled{false};
         static std::atomic<bool> gNotifBridgeEnabled{false};
         static std::atomic<bool> gNotifBridgePlaySound{false};
+
+        // ---------------------------------------------------------------------
+        // HUD Trace: dedicated trace system for HUD/ItemInfo/Widget discovery
+        // Captures EVERYTHING HUD-related with parameter payloads.
+        // Separate from trace_on to allow focused investigation.
+        // ALWAYS ON BY DEFAULT - starts tracing from DLL load.
+        // ---------------------------------------------------------------------
+        static std::atomic<bool> gHudTraceEnabled{true};  // ALWAYS ON
+        static std::atomic<uint64_t> gHudTraceSeq{0};
 
         // Last tablet interaction summary for TCP retrieval.
         static std::mutex gTabletInteractionMutex;
@@ -339,6 +354,658 @@ namespace Mod
         };
 
         static TraceFileWriter gTraceFile;
+
+        // Forward declaration for ToLowerCopy (used by HUD trace before definition)
+        static std::string ToLowerCopy(std::string s);
+
+        // ---------------------------------------------------------------------
+        // HUD Trace: dedicated file writer and pattern matching
+        // ---------------------------------------------------------------------
+        struct HudTraceFileWriter
+        {
+            std::mutex Mutex;
+            std::ofstream File;
+            std::string Path;
+            std::string Buffer;
+            uint64_t BytesWritten = 0;
+            uint64_t LastFlushTickMs = 0;
+
+            static std::string GetHudTracePath()
+            {
+                char tempPath[MAX_PATH] = {};
+                DWORD len = GetTempPathA(MAX_PATH, tempPath);
+                if (len == 0 || len >= MAX_PATH)
+                    return std::string("C:\\itr2_hud_trace.log");
+
+                std::string path(tempPath);
+                if (!path.empty() && path.back() != '\\')
+                    path.push_back('\\');
+                path += "itr2_hud_trace.log";
+                return path;
+            }
+
+            void EnsureOpenLocked(bool truncate)
+            {
+                if (Path.empty())
+                    Path = GetHudTracePath();
+
+                if (File.is_open())
+                {
+                    if (!truncate)
+                        return;
+                    File.close();
+                }
+
+                if (truncate)
+                    File.open(Path, std::ios::out | std::ios::trunc);
+                else
+                    File.open(Path, std::ios::out | std::ios::app);
+            }
+
+            void AppendLineLocked(const std::string& line)
+            {
+                Buffer.append(line);
+                Buffer.push_back('\n');
+
+                const uint64_t now = TraceFileWriter::NowTickMs();
+                const bool sizeFlush = Buffer.size() >= 128 * 1024;
+                const bool timeFlush = (LastFlushTickMs == 0) || (now - LastFlushTickMs >= 250);
+                if (sizeFlush || timeFlush)
+                    FlushLocked();
+            }
+
+            void FlushLocked()
+            {
+                if (!File.is_open())
+                {
+                    LastFlushTickMs = TraceFileWriter::NowTickMs();
+                    Buffer.clear();
+                    return;
+                }
+
+                if (!Buffer.empty())
+                {
+                    File.write(Buffer.data(), static_cast<std::streamsize>(Buffer.size()));
+                    File.flush();
+                    BytesWritten += Buffer.size();
+                    Buffer.clear();
+                }
+
+                LastFlushTickMs = TraceFileWriter::NowTickMs();
+            }
+
+            void WriteEvent(const std::string& jsonLine)
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(false);
+                AppendLineLocked(jsonLine);
+            }
+
+            void ResetFile()
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(true);
+                Buffer.clear();
+                BytesWritten = 0;
+                LastFlushTickMs = 0;
+
+                std::ostringstream oss;
+                oss << "{\"type\":\"HUD_TRACE_RESET\",\"ts\":\"" << TraceFileWriter::CurrentTimeString() << "\""
+                    << ",\"note\":\"HUD trace file truncated\"}";
+                AppendLineLocked(oss.str());
+                FlushLocked();
+            }
+
+            void OnEnabledChanged(bool enabled)
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(false);
+
+                std::ostringstream oss;
+                oss << "{\"type\":\"" << (enabled ? "HUD_TRACE_ENABLED" : "HUD_TRACE_DISABLED") << "\""
+                    << ",\"ts\":\"" << TraceFileWriter::CurrentTimeString() << "\""
+                    << ",\"path\":\"" << TraceFileWriter::JsonEscape(Path) << "\""
+                    << "}";
+                AppendLineLocked(oss.str());
+                FlushLocked();
+
+                if (!enabled && File.is_open())
+                    File.close();
+            }
+
+            void Flush()
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                EnsureOpenLocked(false);
+                FlushLocked();
+            }
+
+            std::string GetPathCopy()
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                if (Path.empty())
+                    Path = GetHudTracePath();
+                return Path;
+            }
+        };
+
+        static HudTraceFileWriter gHudTraceFile;
+
+        // HUD-related function name patterns (case-insensitive matching)
+        // These are substrings that appear in function names we want to capture
+        static const char* kHudFunctionPatterns[] = {
+            // InfoPanel actor
+            "ShowItemInfo",
+            "GetInfoPanelState",
+            "ShowPlayerInfo",
+            "UpdateTransform",
+            // ItemInfo widget base
+            "Enable",
+            "Disable",
+            "OnHolsterAttachChanged",
+            "OnHolsteredItemParentContainerChanged",
+            "BindEventToAllContainersOnItem",
+            "UnbindEventToAllContainersOnItem",
+            "BindItemParentContainerChangedTracking",
+            "IsHandInfo",
+            "SetHandInfo",
+            // WBP_ItemInfo_C widget
+            "RedrawItemInfo",
+            "ShowItemDescription",
+            "CollapseAllEmptyBlocks",
+            "CollapseBlockIfParametrsHidden",
+            "HideParametersInCategories",
+            "HideParametersInCategory",
+            "Set_GeneralInfoData",
+            "Set_WeaponInfoData",
+            "Set_AmmoInfoData",
+            "Set_AttachmentInfoData",
+            "Set_ContainerInfoData",
+            "Set_ModuleInfoData",
+            "SetNextParameter",
+            "ShowCustomParameters",
+            "ShowWarning_MissingEssentional",
+            "ApplyBulletVelocityInfo",
+            "ApplyFireMode",
+            "ApplyFIreRate",
+            "ApplyGeneralWeaponStats",
+            "ApplyLoudnessInfo",
+            "ApplyModuleCommonInfo",
+            "ApplyWeaponCommonInfo",
+            "ApplyWeaponDamage",
+            "UpdateArmorInfo",
+            "OnCurrentItemChildrenChange",
+            "OnStackChanged",
+            "GetConditionToShow",
+            "Define_Item_Static_Data",
+            "Get_Armor_Reduction",
+            "Get_Calculated_Item_Weight",
+            "GetCurrentAmmoInfo",
+            "GetAmmoInChamberData",
+            "GetChamberedAmmoData",
+            "Get_Amount_Ammo_Of_Attached_Magazine",
+            "Get_Magazine_Common_Bullet_Info",
+            "Get_Weapon_Damage_Dynamic",
+            "GetWeaponDamage_StaticOnly",
+            // Widget visibility/animation
+            "SetWidgetVisibility",
+            "SetVisibility",
+            "PlayAnimation",
+            "Show_ItemInfo",
+            "Hide_ItemInfo",
+            "PlayAnimationForward",
+            "PlayAnimationReverse",
+            // Widget construction/binding
+            "ConstructWidget",
+            "AddToViewport",
+            "RemoveFromViewport",
+            "RemoveFromParent",
+            "NativeConstruct",
+            "NativeDestruct",
+            "Construct",
+            "PreConstruct",
+            "OnInitialized",
+            // HUD class
+            "ReceiveDrawHUD",
+            "DrawHUD",
+            "PostRender",
+            "ShowHUD",
+            "HideHUD",
+            // Container/attachment events (context for when ItemInfo shows)
+            "OnAttachChanged",
+            "PutItemToContainer",
+            "OnItemHolsterAttachChanged",
+            "OnActorGripped",
+            "OnActorReleased",
+            "SetHolsteredActor",
+            // RayCaster
+            "PointerHover",
+            "SetParentActor",
+            "GetParentActor",
+            // Data component queries (context for what data is shown)
+            "GetItemStaticData",
+            "GetItemDynamicData",
+            "GetWeaponStaticData",
+            "GetAmmoContainerStaticData",
+            "GetAmmoStaticData",
+            "GetAttachmentStaticData",
+            "GetModuleStaticData",
+            // Delegate signatures that might fire for HUD updates
+            "OnContainerParentChange",
+            "OnAttachChanged",
+            "Internal_OnContainerParentChange",
+            // UMG Widget base class functions
+            "SetColorAndOpacity",
+            "SetRenderOpacity",
+            "SetToolTipText",
+            "SetIsEnabled",
+            "GetVisibility",
+            "SetFocus",
+            "HasFocusedDescendants",
+            "InvalidateLayoutAndVolatility",
+            "ForceLayoutPrepass",
+            // Text/Label widgets
+            "SetText",
+            "GetText",
+            "SetJustification",
+            "SetTextOverflowPolicy",
+            // Image widgets  
+            "SetImage",
+            "SetBrush",
+            "SetBrushFromTexture",
+            "SetBrushFromMaterial",
+            "SetOpacity",
+            // Panel/layout widgets
+            "AddChild",
+            "RemoveChild",
+            "ClearChildren",
+            "AddChildToCanvas",
+            "AddChildToGrid",
+            "AddChildToHorizontalBox",
+            "AddChildToVerticalBox",
+            "AddChildToOverlay",
+            "AddChildToUniformGrid",
+            "SetPadding",
+            "SetHorizontalAlignment",
+            "SetVerticalAlignment",
+            // Content box
+            "SetContent",
+            "GetContentSlot",
+            // Rich text
+            "SetRichText",
+            "SetTextStyle",
+            // Progress bar
+            "SetPercent",
+            "SetFillColorAndOpacity",
+            // Scroll box
+            "ScrollToStart",
+            "ScrollToEnd",
+            "ScrollWidgetIntoView",
+            // Widget component (3D UI)
+            "SetWidget",
+            "GetWidget",
+            "SetDrawSize",
+            "SetWidgetSpace",
+            "SetPivot",
+            "SetTintColorAndOpacity",
+            "SetBackgroundColor",
+            "SetTwoSided",
+            "SetTickWhenOffscreen",
+            "RequestRedraw",
+            // User widget
+            "SetDesiredSizeInViewport",
+            "SetPositionInViewport",
+            "SetOwningPlayer",
+            "SetOwningLocalPlayer",
+            "GetOwningPlayer",
+            // Widget tree construction
+            "CreateWidget",
+            "AddWidget",
+            "SetContentForSlot",
+            // Any overlap/collision events on vise
+            "OnOverlapBegin",
+            "OnOverlapEnd",
+            "OnComponentBeginOverlap",
+            "OnComponentEndOverlap",
+            "NotifyActorBeginOverlap",
+            "NotifyActorEndOverlap",
+            // Actor interaction events
+            "OnGrip",
+            "OnGripRelease",
+            "OnInteractionStarted",
+            "OnInteractionEnded",
+            // Blueprint events
+            "ExecuteUbergraph",
+            "ReceiveBeginPlay",
+            "ReceiveTick",
+            // Specific WBP functions
+            "Convert_InfoParameters_toSymbols",
+            "SetAdditionalInfo_ContainerAndBullet",
+            "GetDeafultBulletVelocity",
+            "Calculate_Weapon_Durability",
+            // Size box
+            "SetWidthOverride",
+            "SetHeightOverride",
+            "SetMaxDesiredWidth",
+            "SetMaxDesiredHeight",
+            // Flicker panel (seen in RayCaster)
+            "StartFlicker",
+            "StopFlicker",
+            // Button events
+            "OnClicked",
+            "OnHovered",
+            "OnUnhovered",
+            "OnPressed",
+            "OnReleased",
+            // In-game menu lifecycle
+            "OnIngameMenuOpened",
+            "OnIngameMenuClosed",
+            "IngameMenu",
+            // Slate visibility
+            "SetRenderTransform",
+            "SetRenderTranslation",
+            "SetRenderScale",
+            "SetRenderShear",
+            "SetRenderTransformAngle",
+            // Blueprint native construct
+            "BP_NativeConstruct",
+            "BlueprintConstruct",
+        };
+
+        // HUD-related object name patterns (case-insensitive)
+        // Expanded to catch more widget/UI related objects
+        static const char* kHudObjectPatterns[] = {
+            // Core info systems
+            "infopanel",
+            "iteminfo",
+            "wbp_iteminfo",
+            "wbpc_iteminfo",
+            "wbpc_im_",
+            "wbpc_item_",
+            "radiuswidget",
+            "radiusinfowid",
+            "ingamemenu",
+            "hud",
+            "vise",
+            "bp_vise",
+            "raycaster",
+            // Widget components
+            "widgetcomponent",
+            "radiuswidgetcomponent",
+            // UMG widgets
+            "userwidget",
+            "widget_",
+            "_widget",
+            "wbp_",
+            "wbpc_",
+            // Panels and containers
+            "panel",
+            "overlay",
+            "canvas",
+            "sizebox",
+            "verticalbox",
+            "horizontalbox",
+            "uniformgrid",
+            "scrollbox",
+            "border",
+            // Text elements
+            "textblock",
+            "richtext",
+            "editabletext",
+            "richtextbox",
+            // Common UI patterns
+            "button",
+            "checkbox",
+            "slider",
+            "progressbar",
+            "image",
+            "icon",
+            // Parameter display
+            "parameter",
+            "statistic",
+            "stat_",
+            "_stat",
+            "value",
+            "label",
+            // Item-related
+            "item_common",
+            "item_parameter",
+            "itemdescription",
+            "iteminstruction",
+            // Weapon/ammo display
+            "weaponinfo",
+            "ammoinfo",
+            "magazineinfo",
+            "attachmentinfo",
+            "moduleinfo",
+            "containerinfo",
+            // Effects/modifiers
+            "effectslist",
+            "modifierslist",
+            "resistancelist",
+            "technicalinfo",
+            "additionalinfo",
+            // Animation
+            "animation",
+            "widgetanimation",
+            // Data components (context)
+            "datacomponent",
+            "radiusdatacomponent",
+            "dynamicdata",
+            "staticdata",
+        };
+
+        // Check if a function name matches HUD patterns
+        static bool IsHudRelatedFunction(const std::string& fnNameLower)
+        {
+            for (const char* pattern : kHudFunctionPatterns)
+            {
+                std::string patternLower(pattern);
+                for (char& c : patternLower) c = (char)tolower((unsigned char)c);
+                if (fnNameLower.find(patternLower) != std::string::npos)
+                    return true;
+            }
+            return false;
+        }
+
+        // Check if an object name matches HUD patterns
+        static bool IsHudRelatedObject(const std::string& objNameLower)
+        {
+            for (const char* pattern : kHudObjectPatterns)
+            {
+                if (objNameLower.find(pattern) != std::string::npos)
+                    return true;
+            }
+            return false;
+        }
+
+        // Helper: get outer chain as string
+        static std::string GetOuterChain(SDK::UObject* obj, int maxDepth = 4)
+        {
+            if (!obj) return "";
+            std::string chain;
+            SDK::UObject* cur = obj->Outer;
+            int depth = 0;
+            while (cur && depth < maxDepth)
+            {
+                if (!chain.empty()) chain += " <- ";
+                chain += cur->GetName();
+                cur = cur->Outer;
+                ++depth;
+            }
+            return chain;
+        }
+
+        // Helper: extract parameter info for specific HUD functions
+        static std::string ExtractHudParamInfo(SDK::UObject* obj, SDK::UFunction* fn, void* parms, const std::string& fnName)
+        {
+            if (!parms) return "";
+
+            std::ostringstream info;
+
+            // ShowItemInfo(URadiusDataComponent* DataComponent)
+            if (fnName.find("showiteminfo") != std::string::npos && fnName.find("show") != std::string::npos)
+            {
+                struct Params { SDK::URadiusDataComponent* DataComponent; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                if (p->DataComponent)
+                {
+                    info << ",\"dataComponentClass\":\"" << TraceFileWriter::JsonEscape(
+                        p->DataComponent->Class ? p->DataComponent->Class->GetName() : "<null>") << "\"";
+                    info << ",\"dataComponentName\":\"" << TraceFileWriter::JsonEscape(p->DataComponent->GetName()) << "\"";
+                }
+            }
+
+            // Enable(URadiusDataComponent* DataComponent)
+            if (fnName == "enable" || fnName.find("enable") != std::string::npos)
+            {
+                // Check if this is ItemInfo::Enable by object type
+                if (obj && obj->IsA(SDK::UItemInfo::StaticClass()))
+                {
+                    struct Params { SDK::URadiusDataComponent* DataComponent; };
+                    auto* p = reinterpret_cast<Params*>(parms);
+                    if (p->DataComponent)
+                    {
+                        info << ",\"dataComponentClass\":\"" << TraceFileWriter::JsonEscape(
+                            p->DataComponent->Class ? p->DataComponent->Class->GetName() : "<null>") << "\"";
+                        info << ",\"dataComponentName\":\"" << TraceFileWriter::JsonEscape(p->DataComponent->GetName()) << "\"";
+                    }
+                }
+            }
+
+            // SetWidgetVisibility(ESlateVisibility NewVisibility)
+            if (fnName.find("setwidgetvisibility") != std::string::npos)
+            {
+                struct Params { uint8_t NewVisibility; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                const char* visNames[] = {"Visible", "Collapsed", "Hidden", "HitTestInvisible", "SelfHitTestInvisible"};
+                int visIdx = p->NewVisibility;
+                info << ",\"newVisibility\":\"" << (visIdx < 5 ? visNames[visIdx] : "Unknown") << "\"";
+                info << ",\"newVisibilityRaw\":" << (int)p->NewVisibility;
+            }
+
+            // SetVisibility (UWidget)
+            if (fnName == "setvisibility")
+            {
+                struct Params { uint8_t InVisibility; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                const char* visNames[] = {"Visible", "Collapsed", "Hidden", "HitTestInvisible", "SelfHitTestInvisible"};
+                int visIdx = p->InVisibility;
+                info << ",\"visibility\":\"" << (visIdx < 5 ? visNames[visIdx] : "Unknown") << "\"";
+            }
+
+            // OnAttachChanged (BP_Vise) - likely has item param
+            if (fnName.find("onattachchanged") != std::string::npos)
+            {
+                // Layout varies; dump first pointer if present
+                struct Params { SDK::AActor* Actor; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                if (p->Actor)
+                {
+                    info << ",\"attachedActor\":\"" << TraceFileWriter::JsonEscape(p->Actor->GetName()) << "\"";
+                    info << ",\"attachedActorClass\":\"" << TraceFileWriter::JsonEscape(
+                        p->Actor->Class ? p->Actor->Class->GetName() : "<null>") << "\"";
+                }
+            }
+
+            // SetHolsteredActor
+            if (fnName.find("setholsteredactor") != std::string::npos)
+            {
+                struct Params { SDK::ARadiusGrippableActorBase* ActorToHolster; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                if (p->ActorToHolster)
+                {
+                    info << ",\"holsteredActor\":\"" << TraceFileWriter::JsonEscape(p->ActorToHolster->GetName()) << "\"";
+                    info << ",\"holsteredActorClass\":\"" << TraceFileWriter::JsonEscape(
+                        p->ActorToHolster->Class ? p->ActorToHolster->Class->GetName() : "<null>") << "\"";
+                }
+            }
+
+            // PutItemToContainer
+            if (fnName.find("putitemtocontainer") != std::string::npos)
+            {
+                struct Params { SDK::AActor* ItemActor; /* FTransform follows */ };
+                auto* p = reinterpret_cast<Params*>(parms);
+                if (p->ItemActor)
+                {
+                    info << ",\"itemActor\":\"" << TraceFileWriter::JsonEscape(p->ItemActor->GetName()) << "\"";
+                    info << ",\"itemActorClass\":\"" << TraceFileWriter::JsonEscape(
+                        p->ItemActor->Class ? p->ItemActor->Class->GetName() : "<null>") << "\"";
+                }
+            }
+
+            // PlayAnimation
+            if (fnName.find("playanimation") != std::string::npos)
+            {
+                struct Params { SDK::UWidgetAnimation* Animation; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                if (p->Animation)
+                {
+                    info << ",\"animation\":\"" << TraceFileWriter::JsonEscape(p->Animation->GetName()) << "\"";
+                }
+            }
+
+            // PointerHover (RayCaster)
+            if (fnName.find("pointerhover") != std::string::npos)
+            {
+                struct Params { SDK::UPrimitiveComponent* HitComponent; };
+                auto* p = reinterpret_cast<Params*>(parms);
+                if (p->HitComponent)
+                {
+                    info << ",\"hitComponent\":\"" << TraceFileWriter::JsonEscape(p->HitComponent->GetName()) << "\"";
+                    SDK::AActor* owner = p->HitComponent->GetOwner();
+                    if (owner)
+                        info << ",\"hitOwner\":\"" << TraceFileWriter::JsonEscape(owner->GetName()) << "\"";
+                }
+            }
+
+            return info.str();
+        }
+
+        // Core HUD trace function - called from ProcessEvent hook
+        static void HudTraceOnProcessEvent(SDK::UObject* obj, SDK::UFunction* fn, void* parms)
+        {
+            if (!gHudTraceEnabled.load(std::memory_order_relaxed))
+                return;
+            if (!obj || !fn)
+                return;
+
+            const std::string fnFull = fn->GetFullName();
+            const std::string objFull = obj->GetFullName();
+            const std::string fnName = fn->GetName();
+            const std::string fnLower = ToLowerCopy(fnFull);
+            const std::string fnNameLower = ToLowerCopy(fnName);
+            const std::string objLower = ToLowerCopy(objFull);
+
+            // Match if EITHER function or object is HUD-related
+            const bool fnMatch = IsHudRelatedFunction(fnNameLower);
+            const bool objMatch = IsHudRelatedObject(objLower);
+
+            if (!fnMatch && !objMatch)
+                return;
+
+            const uint64_t seq = gHudTraceSeq.fetch_add(1, std::memory_order_relaxed);
+            const std::string outerChain = GetOuterChain(obj);
+            const std::string paramInfo = ExtractHudParamInfo(obj, fn, parms, fnNameLower);
+
+            // Build JSON line
+            std::ostringstream oss;
+            oss << "{\"type\":\"HUD_EVENT\""
+                << ",\"ts\":\"" << TraceFileWriter::CurrentTimeString() << "\""
+                << ",\"seq\":" << seq
+                << ",\"tid\":" << GetCurrentThreadId()
+                << ",\"fn\":\"" << TraceFileWriter::JsonEscape(fnFull) << "\""
+                << ",\"fnShort\":\"" << TraceFileWriter::JsonEscape(fnName) << "\""
+                << ",\"obj\":\"" << TraceFileWriter::JsonEscape(objFull) << "\""
+                << ",\"objClass\":\"" << TraceFileWriter::JsonEscape(obj->Class ? obj->Class->GetName() : "<null>") << "\""
+                << ",\"outerChain\":\"" << TraceFileWriter::JsonEscape(outerChain) << "\""
+                << ",\"fnMatch\":" << (fnMatch ? "true" : "false")
+                << ",\"objMatch\":" << (objMatch ? "true" : "false")
+                << paramInfo
+                << "}";
+
+            gHudTraceFile.WriteEvent(oss.str());
+        }
 
         static std::string ToLowerCopy(std::string s)
         {
@@ -1430,8 +2097,23 @@ namespace Mod
                 return false;
             }
 
-            // Don't reallocate - just fill what we have space for
-            int32_t fillTo = (maxElements < capacity) ? maxElements : capacity;
+            // Ensure buffer can actually hold target capacity.
+            if (maxElements < capacity)
+            {
+                const size_t requiredBytes = static_cast<size_t>(capacity) * sizeof(SDK::FStackedItem);
+                void* grown = std::realloc(stackedArr->Data, requiredBytes);
+                if (!grown)
+                {
+                    LOG_ERROR("[AutoMag][Fill] realloc failed: oldMax=" << maxElements << " target=" << capacity);
+                    return false;
+                }
+
+                stackedArr->Data = static_cast<SDK::FStackedItem*>(grown);
+                stackedArr->MaxElements = capacity;
+                LOG_INFO("[AutoMag][Fill] Grew stack buffer from " << maxElements << " to " << capacity);
+            }
+
+            int32_t fillTo = capacity;
             
             if (!stackedArr->Data && fillTo > 0)
             {
@@ -2093,6 +2775,49 @@ namespace Mod
         return gTraceFile.GetPathCopy();
     }
 
+    // ---------------------------------------------------------------------
+    // Diagnostics: HUD-specific trace control API
+    // ---------------------------------------------------------------------
+    void HookManager::HudTrace_SetEnabled(bool enabled)
+    {
+        gHudTraceEnabled.store(enabled, std::memory_order_relaxed);
+        gHudTraceFile.OnEnabledChanged(enabled);
+        LOG_INFO("[HudTrace] HUD TRACE " << (enabled ? "ENABLED" : "DISABLED")
+                                         << " path=" << gHudTraceFile.GetPathCopy());
+    }
+
+    bool HookManager::HudTrace_IsEnabled()
+    {
+        return gHudTraceEnabled.load(std::memory_order_relaxed);
+    }
+
+    void HookManager::HudTrace_Reset()
+    {
+        gHudTraceSeq.store(0, std::memory_order_relaxed);
+        gHudTraceFile.ResetFile();
+        LOG_INFO("[HudTrace] Reset");
+    }
+
+    void HookManager::HudTrace_Flush()
+    {
+        gHudTraceFile.Flush();
+        LOG_INFO("[HudTrace] Flush requested");
+    }
+
+    std::string HookManager::HudTrace_GetFilePath()
+    {
+        return gHudTraceFile.GetPathCopy();
+    }
+
+    std::string HookManager::HudTrace_GetStatus()
+    {
+        std::ostringstream oss;
+        oss << "HudTrace: " << (gHudTraceEnabled.load() ? "ENABLED" : "DISABLED")
+            << " seq=" << gHudTraceSeq.load()
+            << " path=" << gHudTraceFile.GetPathCopy();
+        return oss.str();
+    }
+
     std::string HookManager::TabletDiag_GetLastHolsteredSummary()
     {
         std::lock_guard<std::mutex> lock(TabletMutexRef());
@@ -2491,6 +3216,8 @@ namespace Mod
         if (!gProcessEventReentryGuard)
         {
             TraceOnProcessEvent(pThis, function);
+            // HUD trace: dedicated HUD-specific tracing with parameter capture
+            HudTraceOnProcessEvent(pThis, function, parms);
             // AutoMag diagnostic monitor: log ALL magazine/container/holster related ProcessEvents
             //AutoMag_DiagnosticMonitor(pThis, function);
         }

@@ -180,6 +180,10 @@
     <ClCompile Include="CppSDK\SDK\AudioMixer_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\Basic.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_RadiusPlayerCharacter_Gameplay_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\BP_IngameMenu_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\BPA_FaceFollowingMenu_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\BP_InfoPanel_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\FPS_VRCharacter_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\CoreUObject_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\Engine_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\IntoTheRadius2_functions.cpp" />
@@ -201,6 +205,7 @@
     <ClCompile Include="Mod\ModMain.cpp" />
     <ClCompile Include="Mod\SpatialAudio.cpp" />
     <ClCompile Include="Mod\VRMenuSubsystem.cpp" />
+    <ClCompile Include="Mod\MenuPocSubsystem.cpp" />
     <ClCompile Include="Mod\RuntimeState.cpp" />
     <ClCompile Include="Mod\TcpServer.cpp" />
   </ItemGroup>

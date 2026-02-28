@@ -94,15 +94,24 @@ namespace Mod
         // Debounce state for navigation
         std::chrono::steady_clock::time_point lastNavTime_{};
 
-        // Approach flags (both enabled by default; disable one if it crashes)
-        bool debugStringEnabled_ = true;
-        bool widgetEnabled_ = true;
+        // Approach flags (POC9 is the working approach; others disabled by default)
+        bool debugStringEnabled_ = false;
+        bool widgetEnabled_ = false;
 
         // Widget approach state
         SDK::UWidgetComponent* cachedWidgetComp_ = nullptr;
         SDK::UTextBlock* cachedTextBlock_ = nullptr;
         bool widgetSearched_ = false;
         bool widgetSearchFailed_ = false;
+
+        // POC9 approach state (WBP_Confirmation on left hand)
+        bool poc9Enabled_ = true;
+        SDK::UWBP_Confirmation_C* cachedPoc9Widget_ = nullptr;
+        bool poc9WidgetCreated_ = false;
+
+        void CreatePoc9Widget();
+        void DestroyPoc9Widget();
+        void UpdatePoc9Widget();
 
         // Ring buffer for stable FStrings
         static SDK::FString MakeStableFString(const std::wstring& value);

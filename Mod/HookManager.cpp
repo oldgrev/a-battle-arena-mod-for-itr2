@@ -2624,9 +2624,9 @@ namespace Mod
             return true;  // SUPPRESS game movement while menu is open
         }
 
-        // Select: Left trigger (IA_Trigger_Left)
+        // Select: Left stick press (IA_Run_Toggle)
         // When menu is open, execute the selected item.
-        bool Hook_VRMenu_TriggerLeft(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        bool Hook_VRMenu_StickPress(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
         {
             (void)originalFn;
             if (!object || !function || !parms)
@@ -2634,20 +2634,19 @@ namespace Mod
 
             auto* menu = Mod::VRMenuSubsystem::Get();
             if (!menu || !menu->IsMenuOpen())
-                return false;  // Menu closed — let game handle trigger normally
+                return false;  // Menu closed — let game handle stick press normally
 
-            LogInputActionValueBytes("TriggerLeft", parms);
+            LogInputActionValueBytes("StickPress", parms);
 
-            // For trigger: first float is the analog value (0.0 to 1.0).
-            // Only select on a firm press.
-            const float* triggerValue = reinterpret_cast<const float*>(parms);
-            if (triggerValue[0] > 0.5f)
+            // For button actions: first float is typically 0.0/1.0.
+            const float* buttonValue = reinterpret_cast<const float*>(parms);
+            if (buttonValue[0] > 0.5f)
             {
                 menu->OnSelect();
-                LOG_INFO("[VRMenu:Input] Trigger pressed (value=" << triggerValue[0] << "), executing selected item");
+                LOG_INFO("[VRMenu:Input] Left stick press (value=" << buttonValue[0] << "), executing selected item");
             }
 
-            return true;  // SUPPRESS game trigger (no shooting) while menu is open
+            return true;  // SUPPRESS game stick press action while menu is open
         }
 
     } // anonymous namespace
@@ -2937,8 +2936,8 @@ namespace Mod
         // Left thumbstick: navigate menu up/down when open (_0=Started, _1=Triggered/continuous)
         namedHooks_["InpActEvt_IA_Movement_K2Node_EnhancedInputActionEvent_0"] = &Hook_VRMenu_Movement;
         namedHooks_["InpActEvt_IA_Movement_K2Node_EnhancedInputActionEvent_1"] = &Hook_VRMenu_Movement;
-        // Left trigger: select menu item when open
-        namedHooks_["InpActEvt_IA_Trigger_Left_K2Node_EnhancedInputActionEvent_24"] = &Hook_VRMenu_TriggerLeft;
+        // Left stick press (run toggle): select menu item when open
+        namedHooks_["InpActEvt_IA_Run_Toggle_K2Node_EnhancedInputActionEvent_31"] = &Hook_VRMenu_StickPress;
 
         LOG_INFO("[HookManager] VR Menu input hooks registered (5 events)");
 

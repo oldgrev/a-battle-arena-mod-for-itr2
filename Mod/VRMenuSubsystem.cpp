@@ -12,7 +12,7 @@ AILEARNINGS:
   We only act on one and debounce with 500ms.
 - Navigation uses InpActEvt_IA_Movement (left thumbstick). We only consume this when menu is open.
   When closed, we return false so normal movement works.
-- Selection uses InpActEvt_IA_Trigger_Left (left trigger). Only consumed when menu is open.
+- Selection uses InpActEvt_IA_Run_Toggle (left stick press). Only consumed when menu is open.
 - For widget hijack: we scan GObjects for UTextBlock instances and try to repurpose one on the
   player's PlayerDebugWidget. This is highly experimental.
 */
@@ -241,14 +241,26 @@ namespace Mod
 
         if (!wasOpen)
         {
-            // Opening menu — show confirmation
-            Mod::ModFeedback::ShowMessage(L"[Mod Menu] OPENED — Use left stick to navigate, left trigger to select",
+            // Opening menu — show confirmation and create POC9 widget
+            Mod::ModFeedback::ShowMessage(L"[Mod Menu] OPENED — Use left stick to navigate, left stick press to select",
                 3.0f, SDK::FLinearColor{0.3f, 1.0f, 0.3f, 1.0f});
+            
+            // Create the POC9 widget on the left hand
+            if (poc9Enabled_)
+            {
+                CreatePoc9Widget();
+            }
         }
         else
         {
             Mod::ModFeedback::ShowMessage(L"[Mod Menu] CLOSED",
                 2.0f, SDK::FLinearColor{0.8f, 0.8f, 0.8f, 1.0f});
+            
+            // Destroy the POC9 widget
+            if (poc9Enabled_)
+            {
+                DestroyPoc9Widget();
+            }
         }
 
         return true; // always suppress the original button action
@@ -263,7 +275,7 @@ namespace Mod
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavTime_).count();
 
         // Navigation deadzone and repeat rate
-        const float deadzone = 0.4f;
+        const float deadzone = 0.6f;
         const int repeatMs = 250;
 
         if (std::abs(thumbstickY) < deadzone)
@@ -276,17 +288,23 @@ namespace Mod
 
         if (thumbstickY > deadzone)
         {
+            // Down
+            selectedIndex_++;
+            if (selectedIndex_ >= static_cast<int>(items_.size()))
+                selectedIndex_ = 0;
+        }
+        else if (thumbstickY < -deadzone)
+        {
             // Up
             selectedIndex_--;
             if (selectedIndex_ < 0)
                 selectedIndex_ = static_cast<int>(items_.size()) - 1;
         }
-        else if (thumbstickY < -deadzone)
+
+        // Update POC9 widget to reflect new selection
+        if (poc9Enabled_ && poc9WidgetCreated_)
         {
-            // Down
-            selectedIndex_++;
-            if (selectedIndex_ >= static_cast<int>(items_.size()))
-                selectedIndex_ = 0;
+            UpdatePoc9Widget();
         }
 
         return true; // suppress movement while menu is open
@@ -309,6 +327,12 @@ namespace Mod
             catch (...)
             {
                 LOG_ERROR("[VRMenu] Exception in action for: " << item.label);
+            }
+
+            // Update POC9 widget to reflect new state after action
+            if (poc9Enabled_ && poc9WidgetCreated_)
+            {
+                UpdatePoc9Widget();
             }
         }
 
@@ -337,6 +361,12 @@ namespace Mod
         if (widgetEnabled_)
         {
             RenderWidget(world);
+        }
+
+        // Keep POC9 widget updated (e.g., for status changes from external triggers)
+        if (poc9Enabled_ && poc9WidgetCreated_)
+        {
+            UpdatePoc9Widget();
         }
     }
 
@@ -465,7 +495,7 @@ namespace Mod
 
         // Footer
         SDK::FVector footerPos = menuOrigin - up * (lineSpacing * (static_cast<int>(items_.size()) + 1));
-        SDK::FString footerStr = MakeStableFString(L"[Y/B]=close  [stick]=nav  [trigger]=select");
+        SDK::FString footerStr = MakeStableFString(L"[Y/B]=close  [stick]=nav  [stick press]=select");
         SDK::UKismetSystemLibrary::DrawDebugString(ctx, footerPos, footerStr, nullptr, headerColor, duration);
     }
 
@@ -613,7 +643,7 @@ namespace Mod
             fullText += L"\n";
         }
 
-        fullText += L"\n[Y/B]=close  [stick]=nav  [trigger]=select";
+        fullText += L"\n[Y/B]=close  [stick]=nav  [stick press]=select";
 
         // Set the text on the text block
         try
@@ -639,6 +669,195 @@ namespace Mod
             LOG_ERROR("[VRMenu] Exception in RenderWidget — disabling widget approach");
             widgetSearchFailed_ = true;
             cachedTextBlock_ = nullptr;
+        }
+    }
+
+    // =========================================================================
+    // Approach 3: POC9 Widget — WBP_Confirmation attached to left hand
+    // This approach creates a proper UMG widget with TextBlocks and attaches
+    // it to the W_GripDebug_L WidgetComponent on the player's left hand.
+    // =========================================================================
+    void VRMenuSubsystem::CreatePoc9Widget()
+    {
+        LOG_INFO("[VRMenu:POC9] Creating WBP_Confirmation widget on left hand");
+        
+        if (cachedPoc9Widget_)
+        {
+            LOG_WARN("[VRMenu:POC9] Widget already exists, skipping creation");
+            return;
+        }
+
+        SDK::UWorld* world = GameContext::GetWorld();
+        if (!world)
+        {
+            LOG_WARN("[VRMenu:POC9] No world");
+            return;
+        }
+
+        SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = GameContext::GetPlayerCharacter();
+        if (!player)
+        {
+            LOG_WARN("[VRMenu:POC9] No player");
+            return;
+        }
+
+        SDK::UWidgetComponent* widgetComp = player->W_GripDebug_L;
+        if (!widgetComp)
+        {
+            LOG_WARN("[VRMenu:POC9] W_GripDebug_L is null");
+            return;
+        }
+
+        // Get player controller
+        SDK::APlayerController* pc = SDK::UGameplayStatics::GetPlayerController(world, 0);
+        if (!pc)
+        {
+            LOG_WARN("[VRMenu:POC9] No PlayerController");
+            return;
+        }
+
+        // Get WBP_Confirmation_C class
+        SDK::UClass* confirmWidgetClass = SDK::UWBP_Confirmation_C::StaticClass();
+        if (!confirmWidgetClass)
+        {
+            LOG_WARN("[VRMenu:POC9] WBP_Confirmation_C class not found");
+            return;
+        }
+
+        // Create the widget
+        SDK::UUserWidget* widget = SDK::UWidgetBlueprintLibrary::Create(world, confirmWidgetClass, pc);
+        if (!widget)
+        {
+            LOG_WARN("[VRMenu:POC9] Failed to create widget");
+            return;
+        }
+
+        cachedPoc9Widget_ = static_cast<SDK::UWBP_Confirmation_C*>(widget);
+        LOG_INFO("[VRMenu:POC9] Created widget: " << widget->GetFullName());
+
+        // Set the widget on the widget component
+        widgetComp->SetWidget(cachedPoc9Widget_);
+        
+        // Make visible
+        widgetComp->SetVisibility(true, true);
+        widgetComp->SetHiddenInGame(false, true);
+        widgetComp->SetTwoSided(true);
+        
+        poc9WidgetCreated_ = true;
+
+        // Initial text update
+        UpdatePoc9Widget();
+
+        LOG_INFO("[VRMenu:POC9] Widget attached to left hand");
+    }
+
+    void VRMenuSubsystem::DestroyPoc9Widget()
+    {
+        LOG_INFO("[VRMenu:POC9] Destroying widget");
+
+        if (!cachedPoc9Widget_)
+        {
+            LOG_INFO("[VRMenu:POC9] No widget to destroy");
+            poc9WidgetCreated_ = false;
+            return;
+        }
+
+        // Get the widget component and clear it
+        SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = GameContext::GetPlayerCharacter();
+        if (player && player->W_GripDebug_L)
+        {
+            player->W_GripDebug_L->SetWidget(nullptr);
+            player->W_GripDebug_L->SetVisibility(false, true);
+            LOG_INFO("[VRMenu:POC9] Cleared W_GripDebug_L widget");
+        }
+
+        // Note: We can't properly destroy UObjects, so we just null our pointer
+        cachedPoc9Widget_ = nullptr;
+        poc9WidgetCreated_ = false;
+
+        LOG_INFO("[VRMenu:POC9] Widget destroyed");
+    }
+
+    void VRMenuSubsystem::UpdatePoc9Widget()
+    {
+        if (!cachedPoc9Widget_)
+            return;
+
+        // Build menu text
+        std::wostringstream menu;
+        menu << L"=== MOD MENU ===";
+
+        for (int i = 0; i < static_cast<int>(items_.size()); i++)
+        {
+            auto& item = items_[i];
+
+            // Selection indicator
+            if (i == selectedIndex_)
+                menu << L"\n>> ";
+            else
+                menu << L"\n   ";
+
+            // Item label
+            menu << std::wstring(item.label.begin(), item.label.end());
+
+            // Status
+            std::string status;
+            try { status = item.statusFn(); } catch (...) { status = "?"; }
+            if (!status.empty())
+            {
+                menu << L" [";
+                menu << std::wstring(status.begin(), status.end());
+                menu << L"]";
+            }
+        }
+
+        menu << L"\n\n[A]=close  [stick]=nav  [stick press]=select";
+
+        // Create FText values
+        SDK::FString titleStr(L"=== MOD MENU ===");
+        SDK::FText titleText = SDK::UKismetTextLibrary::Conv_StringToText(titleStr);
+
+        std::wstring menuStr = menu.str();
+        SDK::FString descStr(menuStr.c_str());
+        SDK::FText descText = SDK::UKismetTextLibrary::Conv_StringToText(descStr);
+
+        SDK::FString yesStr(L"Toggle");
+        SDK::FText yesText = SDK::UKismetTextLibrary::Conv_StringToText(yesStr);
+
+        SDK::FString noStr(L"Close");
+        SDK::FText noText = SDK::UKismetTextLibrary::Conv_StringToText(noStr);
+
+        // Set properties
+        cachedPoc9Widget_->Title = titleText;
+        cachedPoc9Widget_->Description = descText;
+        cachedPoc9Widget_->Yes_Text = yesText;
+        cachedPoc9Widget_->No_Text = noText;
+
+        // Try to set TextBlock directly (title)
+        if (cachedPoc9Widget_->Txt_Confirmation_Title)
+        {
+            cachedPoc9Widget_->Txt_Confirmation_Title->SetText(titleText);
+
+            SDK::FSlateColor whiteTitle;
+            whiteTitle.SpecifiedColor = SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f};
+            cachedPoc9Widget_->Txt_Confirmation_Title->SetColorAndOpacity(whiteTitle);
+        }
+
+        // Set MultiLineEditableText directly (description/menu content)
+        if (cachedPoc9Widget_->Txt_TextConfirm)
+        {
+            cachedPoc9Widget_->Txt_TextConfirm->SetText(descText);
+
+            SDK::FTextBlockStyle whiteStyle = cachedPoc9Widget_->Txt_TextConfirm->WidgetStyle;
+            whiteStyle.ColorAndOpacity.SpecifiedColor = SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f};
+            cachedPoc9Widget_->Txt_TextConfirm->SetWidgetStyle(whiteStyle);
+        }
+
+        // Request redraw on the widget component
+        SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = GameContext::GetPlayerCharacter();
+        if (player && player->W_GripDebug_L)
+        {
+            player->W_GripDebug_L->RequestRedraw();
         }
     }
 }

@@ -907,7 +907,25 @@ namespace Mod
             return Mod::MenuPoc::Poc6_SpawnFaceFollowingMenu();
         });
 
-        LOG_INFO("[Command] Menu POC commands registered (poc1-poc6)");
+        Register("poc7", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc7_CreateUserWidget();
+        });
+
+        Register("poc8", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc8_SpawnConfirmation();
+        });
+
+        Register("poc9", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::MenuPoc::Poc9_CreateConfirmWidgetOnHand();
+        });
+
+        LOG_INFO("[Command] Menu POC commands registered (poc1-poc9)");
     }
 
     // Expose cheats update for main loop

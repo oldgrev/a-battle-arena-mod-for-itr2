@@ -2572,9 +2572,9 @@ namespace Mod
             LOG_INFO(oss.str());
         }
 
-        // Toggle menu: Left Y/B button (IA_Button2_Left)
+        // B/Y button: dual-purpose (Grip+BY = toggle menu, BY alone = select item)
         // _17 = Started, _18 = Completed. We act on Started only.
-        bool Hook_VRMenu_ToggleButton(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        bool Hook_VRMenu_ButtonBY(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
         {
             (void)originalFn;
             if (!object || !function || !parms)
@@ -2585,21 +2585,46 @@ namespace Mod
             if (fnName.find("_17") == std::string::npos)
                 return false;
 
-            LogInputActionValueBytes("ToggleButton", parms);
+            LogInputActionValueBytes("ButtonBY", parms);
+
+            auto* menu = Mod::VRMenuSubsystem::Get();
+            if (!menu)
+                return false;
+
+            bool suppress = menu->OnButtonBY();
+            return suppress;
+        }
+
+        // Left grip pressed (IA_Grip_Left)
+        bool Hook_VRMenu_GripLeft(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            if (!object || !function || !parms)
+                return false;
 
             auto* menu = Mod::VRMenuSubsystem::Get();
             if (menu)
-            {
-                menu->OnToggleMenu();
-                LOG_INFO("[VRMenu:Input] Toggle button pressed (Started). Menu is now: " 
-                         << (menu->IsMenuOpen() ? "OPEN" : "CLOSED"));
-            }
+                menu->OnGripPressed();
 
-            return false;  // Don't suppress the Y/B button from the game
+            return false;  // Never suppress grip — game needs it for grabbing
+        }
+
+        // Left grip released (IA_UnGrip_Left)
+        bool Hook_VRMenu_UnGripLeft(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
+        {
+            (void)originalFn;
+            if (!object || !function || !parms)
+                return false;
+
+            auto* menu = Mod::VRMenuSubsystem::Get();
+            if (menu)
+                menu->OnGripReleased();
+
+            return false;  // Never suppress ungrip
         }
 
         // Navigation: Left thumbstick (IA_Movement)
-        // _0 = Started, _1 = Triggered (continuous). We want _1 for ongoing stick input.
+        // _0 = Started, _1 = Triggered (continuous). We want both for stick tracking.
         // When menu is open, we read Y axis for up/down and suppress game movement.
         bool Hook_VRMenu_Movement(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
         {
@@ -2614,39 +2639,14 @@ namespace Mod
             // Log raw bytes for the first few intercepts to diagnose layout
             LogInputActionValueBytes("Movement", parms);
 
-            // FInputActionValue is at offset 0 in the params struct.
-            // For a 2D axis: interpret first 8 bytes as two floats (X, Y).
             const float* axisValues = reinterpret_cast<const float*>(parms);
-            float thumbstickY = axisValues[1];  // Y axis = forward/back = up/down in menu
+            //float thumbstickY = axisValues[1];  // Y axis = forward/back = up/down in menu
+            // UE5 OpenXR input mapping seems to have changed, and left stick Y is now axis 0
+            float thumbstickY = axisValues[0];
 
             menu->OnNavigate(thumbstickY);
 
             return true;  // SUPPRESS game movement while menu is open
-        }
-
-        // Select: Left stick press (IA_Run_Toggle)
-        // When menu is open, execute the selected item.
-        bool Hook_VRMenu_StickPress(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
-        {
-            (void)originalFn;
-            if (!object || !function || !parms)
-                return false;
-
-            auto* menu = Mod::VRMenuSubsystem::Get();
-            if (!menu || !menu->IsMenuOpen())
-                return false;  // Menu closed — let game handle stick press normally
-
-            LogInputActionValueBytes("StickPress", parms);
-
-            // For button actions: first float is typically 0.0/1.0.
-            const float* buttonValue = reinterpret_cast<const float*>(parms);
-            if (buttonValue[0] > 0.5f)
-            {
-                menu->OnSelect();
-                LOG_INFO("[VRMenu:Input] Left stick press (value=" << buttonValue[0] << "), executing selected item");
-            }
-
-            return true;  // SUPPRESS game stick press action while menu is open
         }
 
     } // anonymous namespace
@@ -2930,16 +2930,17 @@ namespace Mod
         namedHooks_["PutItemToContainer"] = &Hook_PutItemToContainer;
 
         // VR Menu input hooks
-        // Left Y/B button: toggle menu open/close (two variants: _17=Started, _18=Completed)
-        namedHooks_["InpActEvt_IA_Button2_Left_K2Node_EnhancedInputActionEvent_17"] = &Hook_VRMenu_ToggleButton;
-        namedHooks_["InpActEvt_IA_Button2_Left_K2Node_EnhancedInputActionEvent_18"] = &Hook_VRMenu_ToggleButton;
+        // Left B/Y button: dual-purpose (grip+BY=toggle, BY alone=select when menu open)
+        namedHooks_["InpActEvt_IA_Button2_Left_K2Node_EnhancedInputActionEvent_17"] = &Hook_VRMenu_ButtonBY;
+        namedHooks_["InpActEvt_IA_Button2_Left_K2Node_EnhancedInputActionEvent_18"] = &Hook_VRMenu_ButtonBY;
+        // Left grip: track grip state for combo activation
+        namedHooks_["InpActEvt_IA_Grip_Left_K2Node_EnhancedInputActionEvent_26"] = &Hook_VRMenu_GripLeft;
+        namedHooks_["InpActEvt_IA_UnGrip_Left_K2Node_EnhancedInputActionEvent_4"] = &Hook_VRMenu_UnGripLeft;
         // Left thumbstick: navigate menu up/down when open (_0=Started, _1=Triggered/continuous)
         namedHooks_["InpActEvt_IA_Movement_K2Node_EnhancedInputActionEvent_0"] = &Hook_VRMenu_Movement;
         namedHooks_["InpActEvt_IA_Movement_K2Node_EnhancedInputActionEvent_1"] = &Hook_VRMenu_Movement;
-        // Left stick press (run toggle): select menu item when open
-        namedHooks_["InpActEvt_IA_Run_Toggle_K2Node_EnhancedInputActionEvent_31"] = &Hook_VRMenu_StickPress;
 
-        LOG_INFO("[HookManager] VR Menu input hooks registered (5 events)");
+        LOG_INFO("[HookManager] VR Menu input hooks registered (6 events: BY, grip, ungrip, movement x2)");
 
         // Build snapshot for lock-free ProcessEvent dispatch
         namedHooksSnapshot_ = namedHooks_;
@@ -3125,9 +3126,7 @@ namespace Mod
         {
             InstallProcessEventHook();
         }
-
-        Mod::ModFeedback::ShowMessage(enabled ? L"Unlimited Ammo ENABLED" : L"Unlimited Ammo DISABLED", 3.0f, {0.0f, 1.0f, 0.0f, 1.0f});
-        LOG_INFO("[HookManager] Unlimited ammo " << (enabled ? "enabled" : "disabled"));
+        // ShowMessage removed - mod menu shows status
     }
 
     void HookManager::SetDurabilityBypassEnabled(bool enabled)
@@ -3138,9 +3137,7 @@ namespace Mod
         {
             InstallProcessEventHook();
         }
-
-        Mod::ModFeedback::ShowMessage(enabled ? L"Durability Bypass ENABLED" : L"Durability Bypass DISABLED", 3.0f, {0.0f, 1.0f, 0.0f, 1.0f});
-        LOG_INFO("[HookManager] Durability bypass " << (enabled ? "enabled" : "disabled"));
+        // ShowMessage removed - mod menu shows status
     }
 
     void HookManager::SetHungerDisabled(bool disabled)
@@ -3151,9 +3148,7 @@ namespace Mod
         {
             InstallProcessEventHook();
         }
-
-        Mod::ModFeedback::ShowMessage(disabled ? L"Hunger Bypass ENABLED" : L"Hunger Bypass DISABLED", 3.0f, {0.0f, 1.0f, 0.0f, 1.0f});
-        LOG_INFO("[HookManager] Hunger disabled " << (disabled ? "enabled" : "disabled"));
+        // ShowMessage removed - mod menu shows status
     }
 
     void HookManager::SetFatigueDisabled(bool disabled)
@@ -3164,9 +3159,7 @@ namespace Mod
         {
             InstallProcessEventHook();
         }
-
-        Mod::ModFeedback::ShowMessage(disabled ? L"Fatigue Bypass ENABLED" : L"Fatigue Bypass DISABLED", 3.0f, {0.0f, 1.0f, 0.0f, 1.0f});
-        LOG_INFO("[HookManager] Fatigue disabled " << (disabled ? "enabled" : "disabled"));
+        // ShowMessage removed - mod menu shows status
     }
 
     void HookManager::SetAutoMagEnabled(bool enabled)

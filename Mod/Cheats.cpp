@@ -71,12 +71,7 @@ namespace Mod
     void Cheats::ToggleGodMode()
     {
         godModeActive_ = !godModeActive_;
-        LOG_INFO("[Cheats] God Mode " << (godModeActive_ ? "enabled" : "disabled"));
-
-        Mod::ModFeedback::ShowMessage(
-            godModeActive_ ? L"[Mod] God Mode: ON" : L"[Mod] God Mode: OFF",
-            3.0f,
-            godModeActive_ ? SDK::FLinearColor{0.2f, 1.0f, 0.2f, 1.0f} : SDK::FLinearColor{1.0f, 0.4f, 0.4f, 1.0f});
+        // ShowMessage removed - mod menu shows status
     }
 
     // ------------------------------------------------------------------------
@@ -122,37 +117,21 @@ namespace Mod
     void Cheats::ToggleUnlimitedAmmo()
     {
         unlimitedAmmoActive_ = !unlimitedAmmoActive_;
-
-        // Update hook manager
         HookManager::Get().SetUnlimitedAmmoEnabled(unlimitedAmmoActive_);
 
-        LOG_INFO("[Cheats] Unlimited Ammo " << (unlimitedAmmoActive_ ? "enabled" : "disabled"));
-
-        Mod::ModFeedback::ShowMessage(
-            unlimitedAmmoActive_ ? L"[Mod] Unlimited Ammo: ON" : L"[Mod] Unlimited Ammo: OFF",
-            3.0f,
-            unlimitedAmmoActive_ ? SDK::FLinearColor{0.2f, 1.0f, 1.0f, 1.0f} : SDK::FLinearColor{1.0f, 0.6f, 0.2f, 1.0f});
-
-        // also toggle durability bypass when enabling unlimited ammo, since they are often used together and durability bypass is simpler (doesn't require ProcessEvent hook logic)
+        // Also toggle durability bypass when enabling unlimited ammo
         if (unlimitedAmmoActive_ && !durabilityBypassActive_)
         {
             ToggleDurabilityBypass();
         }
-
+        // ShowMessage removed - mod menu shows status
     }
 
     void Cheats::ToggleDurabilityBypass()
     {
         durabilityBypassActive_ = !durabilityBypassActive_;
-
         HookManager::Get().SetDurabilityBypassEnabled(durabilityBypassActive_);
-
-        LOG_INFO("[Cheats] Durability Bypass " << (durabilityBypassActive_ ? "enabled" : "disabled"));
-
-        Mod::ModFeedback::ShowMessage(
-            durabilityBypassActive_ ? L"[Mod] Durability Bypass: ON" : L"[Mod] Durability Bypass: OFF",
-            3.0f,
-            durabilityBypassActive_ ? SDK::FLinearColor{0.2f, 1.0f, 0.6f, 1.0f} : SDK::FLinearColor{1.0f, 0.6f, 0.2f, 1.0f});
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsUnlimitedAmmoActive() const
@@ -169,13 +148,7 @@ namespace Mod
     {
         hungerDisabled_ = !hungerDisabled_;
         HookManager::Get().SetHungerDisabled(hungerDisabled_);
-
-        LOG_INFO("[Cheats] Hunger Disabled " << (hungerDisabled_ ? "enabled" : "disabled"));
-
-        Mod::ModFeedback::ShowMessage(
-            hungerDisabled_ ? L"[Mod] Hunger: DISABLED" : L"[Mod] Hunger: ENABLED",
-            3.0f,
-            hungerDisabled_ ? SDK::FLinearColor{0.2f, 1.0f, 0.4f, 1.0f} : SDK::FLinearColor{1.0f, 0.6f, 0.2f, 1.0f});
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsHungerDisabledActive() const
@@ -187,13 +160,7 @@ namespace Mod
     {
         fatigueDisabled_ = !fatigueDisabled_;
         HookManager::Get().SetFatigueDisabled(fatigueDisabled_);
-
-        LOG_INFO("[Cheats] Fatigue Disabled " << (fatigueDisabled_ ? "enabled" : "disabled"));
-
-        Mod::ModFeedback::ShowMessage(
-            fatigueDisabled_ ? L"[Mod] Fatigue: DISABLED" : L"[Mod] Fatigue: ENABLED",
-            3.0f,
-            fatigueDisabled_ ? SDK::FLinearColor{0.2f, 1.0f, 0.4f, 1.0f} : SDK::FLinearColor{1.0f, 0.6f, 0.2f, 1.0f});
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsFatigueDisabledActive() const
@@ -205,19 +172,7 @@ namespace Mod
     {
         bulletTimeActive_ = !bulletTimeActive_;
         bulletTimeDirty_.store(true, std::memory_order_release);
-
-        LOG_INFO("[Cheats] Bullet Time " << (bulletTimeActive_ ? "enabled" : "disabled") << " (Scale: " << bulletTimeScale_ << ")");
-
-        Mod::ModFeedback::ShowMessage(
-            bulletTimeActive_ ? L"[Mod] Bullet Time: ON" : L"[Mod] Bullet Time: OFF",
-            3.0f,
-            bulletTimeActive_ ? SDK::FLinearColor{0.6f, 0.2f, 1.0f, 1.0f} : SDK::FLinearColor{1.0f, 0.6f, 0.2f, 1.0f});
-
-        // Forced update of global dilation when toggling off
-        if (!bulletTimeActive_)
-        {
-            // We'll reset in the next Update() call, but logging it here
-        }
+        // ShowMessage removed - mod menu shows status
     }
 
     void Cheats::SetBulletTimeScale(float scale)
@@ -250,8 +205,7 @@ namespace Mod
         bool oldVal = cheatsub->GetNoClip();
         cheatsub->SetNoClip(!oldVal);
         noClipActive_ = !oldVal;
-        Mod::ModFeedback::ShowMessage(noClipActive_ ? L"[Mod] NoClip: ON" : L"[Mod] NoClip: OFF", 2.0f);
-        LOG_INFO("[Cheats] NoClip " << (noClipActive_ ? "enabled" : "disabled"));
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsNoClipActive() const
@@ -328,8 +282,7 @@ namespace Mod
     void Cheats::ToggleDebugMode()
     {
         debugModeActive_ = !debugModeActive_;
-        LOG_INFO("[Cheats] Debug mode " << (debugModeActive_ ? "enabled" : "disabled"));
-        Mod::ModFeedback::ShowMessage(debugModeActive_ ? L"[Mod] Debug: ON" : L"[Mod] Debug: OFF", 2.0f);
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsDebugModeActive() const
@@ -848,13 +801,7 @@ namespace Mod
     void Cheats::ToggleAnomaliesDisabled()
     {
         anomaliesDisabled_ = !anomaliesDisabled_;
-        LOG_INFO("[Cheats] Anomalies " << (anomaliesDisabled_ ? "DISABLED" : "ENABLED"));
-
-        Mod::ModFeedback::ShowMessage(
-            anomaliesDisabled_ ? L"[Mod] Anomalies: DISABLED" : L"[Mod] Anomalies: ENABLED",
-            3.0f,
-            anomaliesDisabled_ ? SDK::FLinearColor{1.0f, 0.8f, 0.2f, 1.0f}
-                               : SDK::FLinearColor{0.4f, 1.0f, 0.4f, 1.0f});
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsAnomaliesDisabledActive() const
@@ -869,17 +816,8 @@ namespace Mod
     void Cheats::ToggleAutoMag()
     {
         autoMagActive_ = !autoMagActive_;
-        LOG_INFO("[Cheats] AutoMag " << (autoMagActive_ ? "ENABLED" : "DISABLED"));
-
-        // Propagate to HookManager so the ProcessEvent hook knows the state
         HookManager::Get().SetAutoMagEnabled(autoMagActive_);
-
-        Mod::ModFeedback::ShowMessage(
-            autoMagActive_ ? L"[Mod] AutoMag: ENABLED (mags auto-refill in pouches)"
-                           : L"[Mod] AutoMag: DISABLED",
-            3.0f,
-            autoMagActive_ ? SDK::FLinearColor{0.2f, 1.0f, 0.6f, 1.0f}
-                           : SDK::FLinearColor{0.8f, 0.4f, 0.4f, 1.0f});
+        // ShowMessage removed - mod menu shows status
     }
 
     bool Cheats::IsAutoMagActive() const

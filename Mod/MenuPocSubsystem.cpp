@@ -395,7 +395,13 @@ namespace Mod
                 LOG_INFO("[MenuPoc]   WidgetClass: null");
             }
 
-            // Make visible (don't change size!)
+
+            
+            //SDK::FVector2D newDrawSize{500.0, 500.0};
+            // portrait shape
+            SDK::FVector2D newDrawSize{600.0, 1600.0};
+            debugWidgetL->SetDrawSize(newDrawSize);
+
             debugWidgetL->SetVisibility(true, true);
             debugWidgetL->SetHiddenInGame(false, true);
             LOG_INFO("[MenuPoc]   Made visible");

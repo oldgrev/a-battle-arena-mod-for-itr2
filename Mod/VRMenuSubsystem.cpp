@@ -7,14 +7,20 @@ AILEARNINGS:
 - FInputActionValue is 0x20 bytes of opaque data. For a boolean action, the first byte is likely
   the bool (or first 4 bytes are a float 0.0/1.0). For a 2D axis, expect two floats.
   We log the raw bytes on first intercept to verify.
-- The menu toggle hook uses InpActEvt_IA_Button2_Left (Y/B button on left controller).
-  There are two variants (_17 and _18) corresponding to Started and Completed triggers.
-  We only act on one and debounce with 500ms.
+- Menu toggle: Grip+B/Y combo. Track left grip via IA_Grip_Left_26 / IA_UnGrip_Left_4.
+  B/Y button (_17 Started): if grip held => toggle menu, if no grip + menu open => select item.
+  This prevents accidental activation and uses the proven-reliable B/Y event for selection.
 - Navigation uses InpActEvt_IA_Movement (left thumbstick). We only consume this when menu is open.
   When closed, we return false so normal movement works.
-- Selection uses InpActEvt_IA_Run_Toggle (left stick press). Only consumed when menu is open.
+- Stick rebound fix: thumbstick flick caused opposite-direction bounce. Fixed with direction latch:
+  track lastNavDirection_ (CENTER/UP/DOWN), require return to deadzone before accepting new direction.
+- IA_Run_Toggle (_31) and IA_Trigger_Left (_24) were unreliable for selection — events may not fire or
+  value format is wrong. Replaced with B/Y dual-purpose approach.
+- Menu header duplication: title AND description both showed "=== MOD MENU ===". Fixed: only title has it.
 - For widget hijack: we scan GObjects for UTextBlock instances and try to repurpose one on the
   player's PlayerDebugWidget. This is highly experimental.
+- VR pointer: scan GObjects for URadiusWidgetInteractionComponent at runtime. If found on gameplay
+  character, reuse it for pointer interaction with our menu widget. Game may not spawn one in gameplay.
 */
 
 #include "VRMenuSubsystem.hpp"
@@ -23,6 +29,8 @@ AILEARNINGS:
 #include "Cheats.hpp"
 #include "HookManager.hpp"
 #include "ArenaSubsystem.hpp"
+#include "FriendSubsystem.hpp"
+#include "LoadoutSubsystem.hpp"
 #include "ModFeedback.hpp"
 
 #include <cmath>
@@ -55,13 +63,166 @@ namespace Mod
     }
 
     // =========================================================================
-    // Menu items
+    // Page navigation helpers
+    // =========================================================================
+    void VRMenuSubsystem::NavigateToPage(MenuPage page)
+    {
+        // Push current page to stack for back navigation (unless going back)
+        if (page != currentPage_)
+        {
+            pageStack_.push_back(currentPage_);
+        }
+        currentPage_ = page;
+        selectedIndex_ = 0;
+        BuildMenuItems();
+        UpdateWidgetDrawSize();
+        if (poc9WidgetCreated_)
+            UpdatePoc9Widget();
+    }
+
+    std::wstring VRMenuSubsystem::GetPageTitle() const
+    {
+        switch (currentPage_)
+        {
+            case MenuPage::Main:         return L"=== MOD MENU ===";
+            case MenuPage::Cheats:       return L"--- CHEATS ---";
+            case MenuPage::Arena:        return L"--- ARENA CONFIG ---";
+            case MenuPage::Loadouts:     return L"--- LOADOUTS ---";
+            case MenuPage::LoadoutSelect: return L"--- SELECT LOADOUT ---";
+            case MenuPage::SpawnFriend:  return L"--- SPAWN FRIEND ---";
+            case MenuPage::FriendClass:  return L"--- SELECT CLASS ---";
+            default:                     return L"=== MENU ===";
+        }
+    }
+
+    void VRMenuSubsystem::UpdateWidgetDrawSize()
+    {
+        SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = GameContext::GetPlayerCharacter();
+        if (!player || !player->W_GripDebug_L)
+            return;
+
+        // 200 pixels per item, minimum 1000
+        int itemCount = static_cast<int>(items_.size());
+        float height = (std::max)(1000.0f, static_cast<float>(itemCount * 200));
+        
+        SDK::FVector2D newSize{600.0, height};
+        player->W_GripDebug_L->SetDrawSize(newSize);
+    }
+
+    // =========================================================================
+    // Menu items - page-based building
     // =========================================================================
     void VRMenuSubsystem::BuildMenuItems()
     {
         items_.clear();
 
-        // -- Cheats --
+        switch (currentPage_)
+        {
+            case MenuPage::Main:         BuildMainPage(); break;
+            case MenuPage::Cheats:       BuildCheatsPage(); break;
+            case MenuPage::Arena:        BuildArenaPage(); break;
+            case MenuPage::Loadouts:     BuildLoadoutsPage(); break;
+            case MenuPage::LoadoutSelect: BuildLoadoutSelectPage(); break;
+            case MenuPage::SpawnFriend:  BuildSpawnFriendPage(); break;
+            case MenuPage::FriendClass:  BuildFriendClassPage(); break;
+        }
+    }
+
+    // =========================================================================
+    // MAIN PAGE - Quick actions and navigation to sub-menus
+    // =========================================================================
+    void VRMenuSubsystem::BuildMainPage()
+    {
+        // Quick action: Arena Quick Start (start arena with current settings)
+        items_.push_back({"Arena Quick Start",
+            []() -> std::string {
+                auto* a = Arena::ArenaSubsystem::Get();
+                return (a && a->IsActive()) ? "ACTIVE" : "";
+            },
+            [this]() {
+                auto* a = Arena::ArenaSubsystem::Get();
+                if (!a) return;
+                if (a->IsActive())
+                    a->Stop();
+                else
+                    a->Start(arenaEnemyCount_, 15.0f);
+            }
+        });
+
+        // Quick action: Spawn Friend (single friend with current class)
+        items_.push_back({"Quick Spawn Friend",
+            []() -> std::string {
+                auto* f = Friend::FriendSubsystem::Get();
+                return f ? std::to_string(f->ActiveFriendCount()) : "";
+            },
+            []() {
+                auto* f = Friend::FriendSubsystem::Get();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (f && w) f->SpawnFriend(w);
+            }
+        });
+
+        // Navigation: Loadouts
+        items_.push_back({"Loadouts >",
+            []() -> std::string { return ""; },
+            [this]() { NavigateToPage(MenuPage::Loadouts); },
+            true
+        });
+
+        // Navigation: Arena Config
+        items_.push_back({"Arena Config >",
+            [this]() -> std::string {
+                return std::to_string(arenaEnemyCount_) + " enemies";
+            },
+            [this]() { NavigateToPage(MenuPage::Arena); },
+            true
+        });
+
+        // Navigation: Cheats
+        items_.push_back({"Cheats >",
+            []() -> std::string { return ""; },
+            [this]() { NavigateToPage(MenuPage::Cheats); },
+            true
+        });
+
+        // Navigation: Spawn Friend Config
+        items_.push_back({"Spawn Friend >",
+            []() -> std::string { return ""; },
+            [this]() { NavigateToPage(MenuPage::SpawnFriend); },
+            true
+        });
+
+        // Quick action: Spawn Heal
+        items_.push_back({"Spawn Heal Item",
+            []() -> std::string { return ""; },
+            []() {
+                Cheats* c = GetCheats();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (c && w) c->SpawnHealItem(w);
+            }
+        });
+    }
+
+    // =========================================================================
+    // CHEATS PAGE - All cheat toggles
+    // =========================================================================
+    void VRMenuSubsystem::BuildCheatsPage()
+    {
+        // Back button first
+        items_.push_back({"< Back",
+            []() -> std::string { return ""; },
+            [this]() {
+                if (!pageStack_.empty()) {
+                    currentPage_ = pageStack_.back();
+                    pageStack_.pop_back();
+                    selectedIndex_ = 0;
+                    BuildMenuItems();
+                    UpdateWidgetDrawSize();
+                    if (poc9WidgetCreated_) UpdatePoc9Widget();
+                }
+            }
+        });
+
         items_.push_back({"God Mode",
             []() -> std::string {
                 Cheats* c = GetCheats();
@@ -160,51 +321,315 @@ namespace Mod
                 if (c) c->ToggleAnomaliesDisabled();
             }
         });
+    }
 
-        // -- Arena --
-        items_.push_back({"Arena Start",
+    // =========================================================================
+    // ARENA PAGE - Arena configuration
+    // =========================================================================
+    void VRMenuSubsystem::BuildArenaPage()
+    {
+        // Back button
+        items_.push_back({"< Back",
+            []() -> std::string { return ""; },
+            [this]() {
+                if (!pageStack_.empty()) {
+                    currentPage_ = pageStack_.back();
+                    pageStack_.pop_back();
+                    selectedIndex_ = 0;
+                    BuildMenuItems();
+                    UpdateWidgetDrawSize();
+                    if (poc9WidgetCreated_) UpdatePoc9Widget();
+                }
+            }
+        });
+
+        // Toggle Arena
+        items_.push_back({"Toggle Arena",
             []() -> std::string {
                 auto* a = Arena::ArenaSubsystem::Get();
                 return (a && a->IsActive()) ? "ACTIVE" : "STOPPED";
             },
-            []() {
+            [this]() {
                 auto* a = Arena::ArenaSubsystem::Get();
                 if (!a) return;
                 if (a->IsActive())
                     a->Stop();
                 else
-                    a->Start();  // Use defaults for enemy count and distance
+                    a->Start(arenaEnemyCount_, 15.0f);
             }
         });
 
-        items_.push_back({"Spawn Heal",
-            []() -> std::string { return ""; },
-            []() {
-                Cheats* c = GetCheats();
-                SDK::UWorld* w = GameContext::GetWorld();
-                if (c && w) c->SpawnHealItem(w);
-            }
-        });
-
-        // -- Rendering approach toggles (meta) --
-        items_.push_back({"[DebugStr Render]",
-            [this]() -> std::string { return debugStringEnabled_ ? "ON" : "OFF"; },
-            [this]() { debugStringEnabled_ = !debugStringEnabled_; }
-        });
-
-        items_.push_back({"[Widget Render]",
-            [this]() -> std::string { return widgetEnabled_ ? "ON" : "OFF"; },
+        // Enemy count adjustment
+        items_.push_back({"Enemies: +",
+            [this]() -> std::string { return std::to_string(arenaEnemyCount_); },
             [this]() {
-                widgetEnabled_ = !widgetEnabled_;
-                if (!widgetEnabled_)
-                {
-                    // Clear cached widget state when disabling
-                    cachedTextBlock_ = nullptr;
+                arenaEnemyCount_ = (std::min)(20, arenaEnemyCount_ + 1);
+            }
+        });
+
+        items_.push_back({"Enemies: -",
+            [this]() -> std::string { return std::to_string(arenaEnemyCount_); },
+            [this]() {
+                arenaEnemyCount_ = (std::max)(1, arenaEnemyCount_ - 1);
+            }
+        });
+
+        // Wave count adjustment
+        items_.push_back({"Waves: +",
+            [this]() -> std::string { return std::to_string(arenaWaveCount_); },
+            [this]() {
+                arenaWaveCount_ = (std::min)(100, arenaWaveCount_ + 1);
+            }
+        });
+
+        items_.push_back({"Waves: -",
+            [this]() -> std::string { return std::to_string(arenaWaveCount_); },
+            [this]() {
+                arenaWaveCount_ = (std::max)(1, arenaWaveCount_ - 1);
+            }
+        });
+    }
+
+    // =========================================================================
+    // LOADOUTS PAGE - Loadout management
+    // =========================================================================
+    void VRMenuSubsystem::BuildLoadoutsPage()
+    {
+        // Back button
+        items_.push_back({"< Back",
+            []() -> std::string { return ""; },
+            [this]() {
+                if (!pageStack_.empty()) {
+                    currentPage_ = pageStack_.back();
+                    pageStack_.pop_back();
+                    selectedIndex_ = 0;
+                    BuildMenuItems();
+                    UpdateWidgetDrawSize();
+                    if (poc9WidgetCreated_) UpdatePoc9Widget();
                 }
             }
         });
 
-        LOG_INFO("[VRMenu] Built " << items_.size() << " menu items");
+        // Capture current loadout
+        items_.push_back({"Capture Loadout",
+            []() -> std::string { return ""; },
+            []() {
+                auto* ls = Loadout::LoadoutSubsystem::Get();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (ls && w) {
+                    std::string result = ls->CaptureLoadout(w, "quick_capture");
+                }
+            }
+        });
+
+        // Select loadout to apply
+        items_.push_back({"Select Loadout >",
+            []() -> std::string {
+                auto* ls = Loadout::LoadoutSubsystem::Get();
+                return ls ? ls->GetSelectedLoadout() : "";
+            },
+            [this]() { NavigateToPage(MenuPage::LoadoutSelect); },
+            true
+        });
+
+        // Apply selected loadout
+        items_.push_back({"Apply Selected",
+            []() -> std::string {
+                auto* ls = Loadout::LoadoutSubsystem::Get();
+                return ls ? ls->GetSelectedLoadout() : "";
+            },
+            []() {
+                auto* ls = Loadout::LoadoutSubsystem::Get();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (ls && w) {
+                    std::string selected = ls->GetSelectedLoadout();
+                    if (!selected.empty()) {
+                        ls->ApplyLoadout(w, selected);
+                    }
+                }
+            }
+        });
+
+        // Clear loadout
+        items_.push_back({"Clear Equipment",
+            []() -> std::string { return ""; },
+            []() {
+                auto* ls = Loadout::LoadoutSubsystem::Get();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (ls && w) {
+                    ls->ClearPlayerLoadout(w);
+                }
+            }
+        });
+    }
+
+    // =========================================================================
+    // LOADOUT SELECT PAGE - Select which loadout to use
+    // =========================================================================
+    void VRMenuSubsystem::BuildLoadoutSelectPage()
+    {
+        // Back button
+        items_.push_back({"< Back",
+            []() -> std::string { return ""; },
+            [this]() {
+                if (!pageStack_.empty()) {
+                    currentPage_ = pageStack_.back();
+                    pageStack_.pop_back();
+                    selectedIndex_ = 0;
+                    BuildMenuItems();
+                    UpdateWidgetDrawSize();
+                    if (poc9WidgetCreated_) UpdatePoc9Widget();
+                }
+            }
+        });
+
+        // Get available loadouts from the Loadouts folder
+        auto* ls = Loadout::LoadoutSubsystem::Get();
+        if (ls) {
+            std::string loadoutList = ls->ListLoadouts();
+            // Parse the loadout list (format: "- name1\n- name2\n...")
+            std::istringstream iss(loadoutList);
+            std::string line;
+            while (std::getline(iss, line)) {
+                // Remove "- " prefix if present
+                if (line.size() > 2 && line[0] == '-' && line[1] == ' ') {
+                    line = line.substr(2);
+                }
+                // Trim whitespace
+                while (!line.empty() && (line.back() == ' ' || line.back() == '\r' || line.back() == '\n'))
+                    line.pop_back();
+                while (!line.empty() && line.front() == ' ')
+                    line = line.substr(1);
+                
+                if (line.empty()) continue;
+                
+                std::string loadoutName = line;
+                items_.push_back({loadoutName,
+                    [loadoutName]() -> std::string {
+                        auto* ls2 = Loadout::LoadoutSubsystem::Get();
+                        if (ls2 && ls2->GetSelectedLoadout() == loadoutName)
+                            return "SELECTED";
+                        return "";
+                    },
+                    [loadoutName]() {
+                        auto* ls2 = Loadout::LoadoutSubsystem::Get();
+                        if (ls2) ls2->SetSelectedLoadout(loadoutName);
+                    }
+                });
+            }
+        }
+    }
+
+    // =========================================================================
+    // SPAWN FRIEND PAGE - Friend NPC configuration
+    // =========================================================================
+    void VRMenuSubsystem::BuildSpawnFriendPage()
+    {
+        // Back button
+        items_.push_back({"< Back",
+            []() -> std::string { return ""; },
+            [this]() {
+                if (!pageStack_.empty()) {
+                    currentPage_ = pageStack_.back();
+                    pageStack_.pop_back();
+                    selectedIndex_ = 0;
+                    BuildMenuItems();
+                    UpdateWidgetDrawSize();
+                    if (poc9WidgetCreated_) UpdatePoc9Widget();
+                }
+            }
+        });
+
+        // Spawn friend with current settings
+        items_.push_back({"Spawn Friend",
+            []() -> std::string {
+                auto* f = Friend::FriendSubsystem::Get();
+                return f ? std::to_string(f->ActiveFriendCount()) + " active" : "";
+            },
+            []() {
+                auto* f = Friend::FriendSubsystem::Get();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (f && w) f->SpawnFriend(w);
+            }
+        });
+
+        // Select friend class
+        items_.push_back({"Select Class >",
+            [this]() -> std::string {
+                return selectedFriendClass_.empty() ? "Random" : selectedFriendClass_;
+            },
+            [this]() { NavigateToPage(MenuPage::FriendClass); },
+            true
+        });
+
+        // Clear all friends
+        items_.push_back({"Clear All Friends",
+            []() -> std::string { return ""; },
+            []() {
+                auto* f = Friend::FriendSubsystem::Get();
+                SDK::UWorld* w = GameContext::GetWorld();
+                if (f && w) f->ClearAll(w);
+            }
+        });
+    }
+
+    // =========================================================================
+    // FRIEND CLASS PAGE - Select which NPC class to spawn
+    // =========================================================================
+    void VRMenuSubsystem::BuildFriendClassPage()
+    {
+        // Back button
+        items_.push_back({"< Back",
+            []() -> std::string { return ""; },
+            [this]() {
+                if (!pageStack_.empty()) {
+                    currentPage_ = pageStack_.back();
+                    pageStack_.pop_back();
+                    selectedIndex_ = 0;
+                    BuildMenuItems();
+                    UpdateWidgetDrawSize();
+                    if (poc9WidgetCreated_) UpdatePoc9Widget();
+                }
+            }
+        });
+
+        // Random option
+        items_.push_back({"Random",
+            [this]() -> std::string {
+                return selectedFriendClass_.empty() ? "SELECTED" : "";
+            },
+            [this]() {
+                selectedFriendClass_ = "";
+            }
+        });
+
+        // Get available friend classes from arena discovered NPCs
+        auto* arena = Arena::ArenaSubsystem::Get();
+        if (arena) {
+            const auto& npcs = arena->GetDiscoveredNPCs();
+            for (const auto& npcClass : npcs) {
+                // Extract short name from full path
+                std::string shortName = npcClass;
+                size_t lastSlash = shortName.rfind('/');
+                if (lastSlash != std::string::npos)
+                    shortName = shortName.substr(lastSlash + 1);
+                // Remove BP_ prefix and _C suffix if present
+                if (shortName.size() > 3 && shortName.substr(0, 3) == "BP_")
+                    shortName = shortName.substr(3);
+                if (shortName.size() > 2 && shortName.substr(shortName.size() - 2) == "_C")
+                    shortName = shortName.substr(0, shortName.size() - 2);
+                
+                std::string fullClass = npcClass;
+                items_.push_back({shortName,
+                    [this, fullClass]() -> std::string {
+                        return selectedFriendClass_ == fullClass ? "SELECTED" : "";
+                    },
+                    [this, fullClass]() {
+                        selectedFriendClass_ = fullClass;
+                    }
+                });
+            }
+        }
     }
 
     // =========================================================================
@@ -223,79 +648,143 @@ namespace Mod
     // =========================================================================
     // Input hooks
     // =========================================================================
-    bool VRMenuSubsystem::OnToggleMenu()
+
+    // --- Grip state tracking ---
+    void VRMenuSubsystem::OnGripPressed()
+    {
+        gripHeld_.store(true, std::memory_order_relaxed);
+    }
+
+    void VRMenuSubsystem::OnGripReleased()
+    {
+        gripHeld_.store(false, std::memory_order_relaxed);
+    }
+
+    // --- B/Y button: dual-purpose (Grip+BY = toggle, BY alone = select) ---
+    bool VRMenuSubsystem::OnButtonBY()
     {
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastToggleTime_).count();
-        if (elapsed < 500)
+
+        bool isGripHeld = gripHeld_.load(std::memory_order_relaxed);
+        bool isOpen = menuOpen_.load();
+
+        if (isGripHeld)
         {
-            // Debounce: ignore toggles within 500ms
-            return menuOpen_.load();  // still suppress if menu is open
-        }
-        lastToggleTime_ = now;
-
-        bool wasOpen = menuOpen_.load();
-        menuOpen_.store(!wasOpen);
-
-        LOG_INFO("[VRMenu] Menu toggled " << (wasOpen ? "CLOSED" : "OPEN"));
-
-        if (!wasOpen)
-        {
-            // Opening menu — show confirmation and create POC9 widget
-            Mod::ModFeedback::ShowMessage(L"[Mod Menu] OPENED — Use left stick to navigate, left stick press to select",
-                3.0f, SDK::FLinearColor{0.3f, 1.0f, 0.3f, 1.0f});
-            
-            // Create the POC9 widget on the left hand
-            if (poc9Enabled_)
+            // --- GRIP + B/Y = TOGGLE MENU ---
+            if (elapsed < 500)
             {
-                CreatePoc9Widget();
+                return isOpen; // suppress if menu is open
             }
-        }
-        else
-        {
-            Mod::ModFeedback::ShowMessage(L"[Mod Menu] CLOSED",
-                2.0f, SDK::FLinearColor{0.8f, 0.8f, 0.8f, 1.0f});
-            
-            // Destroy the POC9 widget
-            if (poc9Enabled_)
+            lastToggleTime_ = now;
+
+            bool wasOpen = isOpen;
+            menuOpen_.store(!wasOpen);
+
+            if (!wasOpen)
             {
-                DestroyPoc9Widget();
+                // Opening menu - reset to main page
+                currentPage_ = MenuPage::Main;
+                pageStack_.clear();
+                selectedIndex_ = 0;
+                BuildMenuItems();
+                
+                if (poc9Enabled_)
+                    CreatePoc9Widget();
             }
+            else
+            {
+                // Closing menu - reset state for next open
+                currentPage_ = MenuPage::Main;
+                pageStack_.clear();
+                selectedIndex_ = 0;
+                
+                if (poc9Enabled_)
+                    DestroyPoc9Widget();
+            }
+
+            return true; // suppress the B/Y button
+        }
+        else if (isOpen)
+        {
+            // --- B/Y WITHOUT GRIP (menu open) = SELECT ITEM ---
+            if (elapsed < 300)
+            {
+                return true;
+            }
+            lastToggleTime_ = now;
+
+            if (selectedIndex_ >= 0 && selectedIndex_ < static_cast<int>(items_.size()))
+            {
+                auto& item = items_[selectedIndex_];
+
+                try
+                {
+                    item.actionFn();
+                    // Menu updates automatically via UpdatePoc9Widget, no ShowMessage needed
+                }
+                catch (...)
+                {
+                    // Silent failure
+                }
+
+                if (poc9Enabled_ && poc9WidgetCreated_)
+                    UpdatePoc9Widget();
+            }
+
+            return true; // suppress B/Y while menu is open
         }
 
-        return true; // always suppress the original button action
+        // Menu is closed and no grip held — don't consume the button
+        return false;
     }
 
+    // --- Thumbstick navigation with anti-rebound ---
     bool VRMenuSubsystem::OnNavigate(float thumbstickY)
     {
         if (!menuOpen_.load())
             return false; // don't consume input when menu is closed
 
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavTime_).count();
-
         // Navigation deadzone and repeat rate
-        const float deadzone = 0.6f;
+        const float deadzone = 0.5f;
         const int repeatMs = 250;
 
+        // Anti-rebound: when inside deadzone, reset direction to CENTER
         if (std::abs(thumbstickY) < deadzone)
-            return true; // inside deadzone but menu is open — still suppress movement
+        {
+            lastNavDirection_ = NavDirection::CENTER;
+            return true; // suppress movement while menu is open
+        }
 
+        // Determine intended direction
+        NavDirection intended = (thumbstickY > 0) ? NavDirection::DOWN : NavDirection::UP;
+
+        // Anti-rebound: only accept navigation if we were at CENTER or same direction
+        // This prevents stick overshoot from triggering opposite navigation
+        if (lastNavDirection_ != NavDirection::CENTER && lastNavDirection_ != intended)
+        {
+            // Stick went from one direction to opposite without passing through center
+            // This is a rebound — ignore it
+            return true;
+        }
+
+        // Rate limiting
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavTime_).count();
         if (elapsed < repeatMs)
-            return true; // rate limit
+            return true;
 
         lastNavTime_ = now;
+        lastNavDirection_ = intended;
 
-        if (thumbstickY > deadzone)
+        if (intended == NavDirection::DOWN)
         {
-            // Down
             selectedIndex_++;
             if (selectedIndex_ >= static_cast<int>(items_.size()))
                 selectedIndex_ = 0;
         }
-        else if (thumbstickY < -deadzone)
+        else
         {
-            // Up
             selectedIndex_--;
             if (selectedIndex_ < 0)
                 selectedIndex_ = static_cast<int>(items_.size()) - 1;
@@ -308,35 +797,6 @@ namespace Mod
         }
 
         return true; // suppress movement while menu is open
-    }
-
-    bool VRMenuSubsystem::OnSelect()
-    {
-        if (!menuOpen_.load())
-            return false; // don't consume input when menu is closed
-
-        if (selectedIndex_ >= 0 && selectedIndex_ < static_cast<int>(items_.size()))
-        {
-            auto& item = items_[selectedIndex_];
-            LOG_INFO("[VRMenu] Executing: " << item.label);
-
-            try
-            {
-                item.actionFn();
-            }
-            catch (...)
-            {
-                LOG_ERROR("[VRMenu] Exception in action for: " << item.label);
-            }
-
-            // Update POC9 widget to reflect new state after action
-            if (poc9Enabled_ && poc9WidgetCreated_)
-            {
-                UpdatePoc9Widget();
-            }
-        }
-
-        return true; // suppress trigger while menu is open
     }
 
     // =========================================================================
@@ -495,7 +955,7 @@ namespace Mod
 
         // Footer
         SDK::FVector footerPos = menuOrigin - up * (lineSpacing * (static_cast<int>(items_.size()) + 1));
-        SDK::FString footerStr = MakeStableFString(L"[Y/B]=close  [stick]=nav  [stick press]=select");
+        SDK::FString footerStr = MakeStableFString(L"[grip+B/Y]=toggle  [stick]=nav  [B/Y]=select");
         SDK::UKismetSystemLibrary::DrawDebugString(ctx, footerPos, footerStr, nullptr, headerColor, duration);
     }
 
@@ -528,6 +988,7 @@ namespace Mod
         }
 
         LOG_INFO("[VRMenu] Found PlayerDebugWidget: " << debugWidget->GetFullName());
+
 
         // Check if it has an existing UUserWidget
         SDK::UUserWidget* existingWidget = debugWidget->GetWidget();
@@ -643,7 +1104,7 @@ namespace Mod
             fullText += L"\n";
         }
 
-        fullText += L"\n[Y/B]=close  [stick]=nav  [stick press]=select";
+        fullText += L"\n[grip+B/Y]=toggle  [stick]=nav  [B/Y]=select";
 
         // Set the text on the text block
         try
@@ -745,8 +1206,14 @@ namespace Mod
         
         poc9WidgetCreated_ = true;
 
+        // Set draw size based on number of menu items
+        UpdateWidgetDrawSize();
+
         // Initial text update
         UpdatePoc9Widget();
+
+        // Try to find a VR pointer interaction component (experimental)
+        TryScanForVRPointer();
 
         LOG_INFO("[VRMenu:POC9] Widget attached to left hand");
     }
@@ -783,9 +1250,8 @@ namespace Mod
         if (!cachedPoc9Widget_)
             return;
 
-        // Build menu text
+        // Build menu text — items only, NO header (title is set separately to avoid duplication)
         std::wostringstream menu;
-        menu << L"=== MOD MENU ===";
 
         for (int i = 0; i < static_cast<int>(items_.size()); i++)
         {
@@ -793,9 +1259,9 @@ namespace Mod
 
             // Selection indicator
             if (i == selectedIndex_)
-                menu << L"\n>> ";
+                menu << L">> ";
             else
-                menu << L"\n   ";
+                menu << L"   ";
 
             // Item label
             menu << std::wstring(item.label.begin(), item.label.end());
@@ -809,19 +1275,23 @@ namespace Mod
                 menu << std::wstring(status.begin(), status.end());
                 menu << L"]";
             }
+
+            if (i < static_cast<int>(items_.size()) - 1)
+                menu << L"\n";
         }
 
-        menu << L"\n\n[A]=close  [stick]=nav  [stick press]=select";
+        menu << L"\n\n[grip+B/Y]=close  [stick]=nav  [B/Y]=select";
 
-        // Create FText values
-        SDK::FString titleStr(L"=== MOD MENU ===");
+        // Create FText values with dynamic title based on current page
+        std::wstring titleWStr = GetPageTitle();
+        SDK::FString titleStr(titleWStr.c_str());
         SDK::FText titleText = SDK::UKismetTextLibrary::Conv_StringToText(titleStr);
 
         std::wstring menuStr = menu.str();
         SDK::FString descStr(menuStr.c_str());
         SDK::FText descText = SDK::UKismetTextLibrary::Conv_StringToText(descStr);
 
-        SDK::FString yesStr(L"Toggle");
+        SDK::FString yesStr(L"Select");
         SDK::FText yesText = SDK::UKismetTextLibrary::Conv_StringToText(yesStr);
 
         SDK::FString noStr(L"Close");
@@ -858,6 +1328,81 @@ namespace Mod
         if (player && player->W_GripDebug_L)
         {
             player->W_GripDebug_L->RequestRedraw();
+        }
+    }
+
+    // =========================================================================
+    // VR Pointer Interaction (experimental)
+    // Scan for existing UWidgetInteractionComponent in the scene.
+    // The game uses URadiusWidgetInteractionComponent (subclass) with beam,
+    // but we'll accept any UWidgetInteractionComponent.
+    // =========================================================================
+    void VRMenuSubsystem::TryScanForVRPointer()
+    {
+        if (vrPointerScanned_)
+            return;
+        vrPointerScanned_ = true;
+
+        LOG_INFO("[VRMenu:Pointer] Scanning for UWidgetInteractionComponent instances...");
+
+        SDK::UClass* wicClass = SDK::UWidgetInteractionComponent::StaticClass();
+        if (!wicClass)
+        {
+            LOG_WARN("[VRMenu:Pointer] UWidgetInteractionComponent::StaticClass() is null");
+            return;
+        }
+
+        int totalObjects = SDK::UObject::GObjects->Num();
+        int scanLimit = (totalObjects < 300000) ? totalObjects : 300000;
+        int foundCount = 0;
+
+        for (int idx = 0; idx < scanLimit; idx++)
+        {
+            SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(idx);
+            if (!obj)
+                continue;
+
+            // Check if this is a UWidgetInteractionComponent (or subclass)
+            if (!obj->IsA(wicClass))
+                continue;
+
+            foundCount++;
+            SDK::UWidgetInteractionComponent* wic = static_cast<SDK::UWidgetInteractionComponent*>(obj);
+
+            std::string fullName = obj->GetFullName();
+            LOG_INFO("[VRMenu:Pointer] Found WIC #" << foundCount << ": " << fullName);
+
+            // Check if it has a valid outer (attached to something)
+            std::string outerName = obj->Outer ? obj->Outer->GetFullName() : "<null>";
+            LOG_INFO("[VRMenu:Pointer]   Outer: " << outerName);
+
+            // Try to use the first one we find that belongs to a player character
+            if (!cachedVRPointer_ && outerName.find("PlayerCharacter") != std::string::npos)
+            {
+                cachedVRPointer_ = wic;
+                LOG_INFO("[VRMenu:Pointer] Selected WIC for pointer interaction: " << fullName);
+            }
+        }
+
+        LOG_INFO("[VRMenu:Pointer] Scan complete. Found " << foundCount << " WIC instances. "
+                 << (cachedVRPointer_ ? "USING one for interaction." : "None attached to player."));
+
+        // If we found a pointer, try to configure it for our widget
+        if (cachedVRPointer_)
+        {
+            try
+            {
+                // Enable hit testing and set interaction distance
+                cachedVRPointer_->bEnableHitTesting = true;
+                cachedVRPointer_->InteractionDistance = 100.0f; // 1 meter
+                cachedVRPointer_->bShowDebug = true; // Show debug beam so user can see it
+                LOG_INFO("[VRMenu:Pointer] Configured pointer: hitTest=true, dist=100, debug=true");
+            }
+            catch (...)
+            {
+                LOG_ERROR("[VRMenu:Pointer] Exception configuring pointer");
+                cachedVRPointer_ = nullptr;
+            }
         }
     }
 }

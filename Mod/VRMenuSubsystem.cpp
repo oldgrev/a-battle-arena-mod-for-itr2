@@ -113,7 +113,7 @@ namespace Mod
             return;
 
         int itemCount = static_cast<int>(items_.size());
-        float height = (std::max)(600.0f, static_cast<float>(itemCount * 200));
+        float height = (std::max)(600.0f, static_cast<float>(itemCount * 100));
         
         SDK::FVector2D newSize{600.0, height};
         player->W_GripDebug_L->SetDrawSize(newSize);
@@ -164,6 +164,15 @@ namespace Mod
     // =========================================================================
     void VRMenuSubsystem::BuildMainPage()
     {
+
+        
+
+        // Navigation: Cheats
+        items_.push_back({"Cheats >",
+            []() -> std::string { return ""; },
+            [this]() { NavigateToPage(MenuPage::Cheats); },
+            true
+        });
         // Quick action: Arena Quick Start (start arena with current settings)
         items_.push_back({"Arena Quick Start",
             []() -> std::string {
@@ -209,13 +218,6 @@ namespace Mod
             true
         });
 
-        // Navigation: Cheats
-        items_.push_back({"Cheats >",
-            []() -> std::string { return ""; },
-            [this]() { NavigateToPage(MenuPage::Cheats); },
-            true
-        });
-
         // Navigation: Spawn Friend Config
         items_.push_back({"Spawn Friend >",
             []() -> std::string { return ""; },
@@ -253,6 +255,48 @@ namespace Mod
                 }
             }
         });
+        
+        items_.push_back({"Combo Bypass",
+            []() -> std::string {
+                Cheats* c = GetCheats();
+                // automag, durability bypass, and fatigue activate
+                bool comboActive = c && c->IsAutoMagActive() && c->IsDurabilityBypassActive() && c->IsFatigueDisabledActive();
+                return comboActive ? "ON" : "OFF";
+
+            },
+            []() {
+                Cheats* c = GetCheats();
+                if (c) {
+                    // Toggle all three cheats together for a powerful combo
+                    c->SetAutoMag(true);
+                    c->ToggleDurabilityBypass();
+                    c->ToggleFatigueDisabled();
+                }
+                
+            }
+        });
+
+        items_.push_back({"No Anomalies",
+            []() -> std::string {
+                Cheats* c = GetCheats();
+                return c && c->IsAnomaliesDisabledActive() ? "ON" : "OFF";
+            },
+            []() {
+                Cheats* c = GetCheats();
+                if (c) c->ToggleAnomaliesDisabled();
+            }
+        });
+
+        items_.push_back({"Durability Bypass",
+            []() -> std::string {
+                Cheats* c = GetCheats();
+                return c && c->IsDurabilityBypassActive() ? "ON" : "OFF";
+            },
+            []() {
+                Cheats* c = GetCheats();
+                if (c) c->ToggleDurabilityBypass();
+            }
+        });
 
         items_.push_back({"God Mode",
             []() -> std::string {
@@ -273,17 +317,6 @@ namespace Mod
             []() {
                 Cheats* c = GetCheats();
                 if (c) c->ToggleUnlimitedAmmo();
-            }
-        });
-
-        items_.push_back({"Durability Bypass",
-            []() -> std::string {
-                Cheats* c = GetCheats();
-                return c && c->IsDurabilityBypassActive() ? "ON" : "OFF";
-            },
-            []() {
-                Cheats* c = GetCheats();
-                if (c) c->ToggleDurabilityBypass();
             }
         });
 
@@ -342,16 +375,6 @@ namespace Mod
             }
         });
 
-        items_.push_back({"No Anomalies",
-            []() -> std::string {
-                Cheats* c = GetCheats();
-                return c && c->IsAnomaliesDisabledActive() ? "ON" : "OFF";
-            },
-            []() {
-                Cheats* c = GetCheats();
-                if (c) c->ToggleAnomaliesDisabled();
-            }
-        });
         // light scaling!
         items_.push_back({"Portable Light Intensity x2.0",
             []() -> std::string {

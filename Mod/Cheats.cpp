@@ -377,10 +377,10 @@ namespace Mod
         // Note: anomaliesDisabled_ is NOT toggled on level change -- it persists intentionally.
 
         // Clear any cached light pointers/intensities on level change.
-        portableLightOriginalIntensity_.clear();
-        portableLightOriginalFadeDistance_.clear();
-        portableLightScaleDirty_.store(true, std::memory_order_release);
-        lastPortableLightWorld_ = nullptr;
+        //portableLightOriginalIntensity_.clear();
+        //portableLightOriginalFadeDistance_.clear();
+        //portableLightScaleDirty_.store(true, std::memory_order_release);
+        //lastPortableLightWorld_ = nullptr;
         lastBulletTimeWorld_ = nullptr;
         lastBulletTimePlayer_ = nullptr;
         bulletTimeDirty_.store(true, std::memory_order_release);

@@ -113,7 +113,7 @@ namespace Mod
             return;
 
         int itemCount = static_cast<int>(items_.size());
-        float height = (std::max)(1000.0f, static_cast<float>(itemCount * 200));
+        float height = (std::max)(600.0f, static_cast<float>(itemCount * 200));
         
         SDK::FVector2D newSize{600.0, height};
         player->W_GripDebug_L->SetDrawSize(newSize);
@@ -366,7 +366,7 @@ namespace Mod
         items_.push_back({ "Portable Light Intensity x0.5",
             []() -> std::string {
                 Cheats* c = GetCheats();
-                return c ? std::to_string(c->GetPortableLightIntensityScale()) : "1.0";
+                return c ? std::to_string(c->GetPortableLightIntensityScale()) : "10.0";
             },
             []() {
                 Cheats* c = GetCheats();

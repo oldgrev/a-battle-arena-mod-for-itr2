@@ -64,6 +64,9 @@
 //   With correct double reading, OnNavigate's 0.5 deadzone naturally suppresses left/right stick input.
 // - HUD Trace: when adding large blocks of code in anonymous namespaces that use utility functions like ToLowerCopy(), ensure forward
 //   declarations are added before the usage. The anonymous namespace has strict ordering - functions must be declared before use.
+// - AutoMag reload safety: SetHolsteredActor/PutItemToContainer can still fire during level transition with objects that are pending-kill
+//   or otherwise invalid in the old world. Fix: gate all AutoMag entry points and dynamic-data resolution with UKismetSystemLibrary::IsValid
+//   and bail out before dereferencing stale pointers.
 //
 
 
@@ -1709,6 +1712,11 @@ namespace Mod
         static void AutoMag_ProcessHolster(SDK::UObject* object, SDK::ARadiusGrippableActorBase* actorToHolster);
         static void AutoMag_ProcessContainer(SDK::UObject* object, SDK::AActor* itemActor);
 
+        static bool AutoMag_IsValidObject(const SDK::UObject* obj)
+        {
+            return obj && SDK::UKismetSystemLibrary::IsValid(obj);
+        }
+
         // Tablet discovery shared state (implemented below; declared here so hooks can call it).
         static std::mutex& TabletMutexRef();
         static std::string& LastHolsteredActorRef();
@@ -1754,6 +1762,12 @@ namespace Mod
                 }
                 else
                 {
+                    if (!AutoMag_IsValidObject(object) || !AutoMag_IsValidObject(params->ActorToHolster))
+                    {
+                        LOG_WARN("[AutoMag] SetHolsteredActor received invalid object(s); skipping refill");
+                    }
+                    else
+                    {
                     try
                     {
                         AutoMag_ProcessHolster(object, params->ActorToHolster);
@@ -1761,6 +1775,7 @@ namespace Mod
                     catch (...)
                     {
                         LOG_ERROR("[AutoMag] EXCEPTION in AutoMag_ProcessHolster - prevented crash");
+                    }
                     }
                 }
             }
@@ -1831,13 +1846,20 @@ namespace Mod
             // Modify magazine BEFORE calling original, so container reads the filled state
             if (HookManager::Get().IsAutoMagEnabled() && params->ItemActor)
             {
-                try
+                if (!AutoMag_IsValidObject(object) || !AutoMag_IsValidObject(params->ItemActor))
                 {
-                    AutoMag_ProcessContainer(object, params->ItemActor);
+                    LOG_WARN("[AutoMag] PutItemToContainer received invalid object(s); skipping refill");
                 }
-                catch (...)
+                else
                 {
-                    LOG_ERROR("[AutoMag] EXCEPTION in AutoMag_ProcessContainer - prevented crash");
+                    try
+                    {
+                        AutoMag_ProcessContainer(object, params->ItemActor);
+                    }
+                    catch (...)
+                    {
+                        LOG_ERROR("[AutoMag] EXCEPTION in AutoMag_ProcessContainer - prevented crash");
+                    }
                 }
             }
 
@@ -2022,7 +2044,7 @@ namespace Mod
         // URadiusDataComponent::ItemDynamicDataPtr (TWeakObjectPtr) is at offset 0x0430.
         static SDK::URadiusItemDynamicData* GetDynamicDataFromActor(SDK::AActor* actor)
         {
-            if (!actor) return nullptr;
+            if (!AutoMag_IsValidObject(actor)) return nullptr;
             if (!SDK::UObject::GObjects) return nullptr;
 
             // Check it's actually a RadiusItemBase (or derived).
@@ -2031,7 +2053,7 @@ namespace Mod
 
             auto* itemBase = static_cast<SDK::ARadiusItemBase*>(actor);
             SDK::URadiusDataComponent* dataComp = itemBase->DataComponent;
-            if (!dataComp) return nullptr;
+            if (!AutoMag_IsValidObject(dataComp)) return nullptr;
 
             // ItemDynamicDataPtr is a TWeakObjectPtr<URadiusItemDynamicData> at 0x0430.
             // TWeakObjectPtr stores {int32 ObjectIndex, int32 ObjectSerialNumber}.
@@ -2042,7 +2064,7 @@ namespace Mod
             if (raw->ObjectIndex < 0) return nullptr;
 
             SDK::UObject* resolved = SDK::UObject::GObjects->GetByIndex(raw->ObjectIndex);
-            if (!resolved) return nullptr;
+            if (!AutoMag_IsValidObject(resolved)) return nullptr;
             if (!resolved->IsA(SDK::URadiusItemDynamicData::StaticClass())) return nullptr;
 
             return static_cast<SDK::URadiusItemDynamicData*>(resolved);
@@ -2097,7 +2119,7 @@ namespace Mod
         //
         static bool AutoMag_FillMagazine(SDK::AActor* magazineActor, int32_t capacity, SDK::FGameplayTag ammoTag)
         {
-            if (!magazineActor || capacity <= 0)
+            if (!AutoMag_IsValidObject(magazineActor) || capacity <= 0)
             {
                 LOG_ERROR("[AutoMag][Fill] Invalid params: actor=" << (void*)magazineActor << " capacity=" << capacity);
                 return false;
@@ -2271,7 +2293,7 @@ namespace Mod
             // Step 3: Try SDK calls on stack component (FillStackWithItems + AddByTag loop)
             // ====================================================================
             bool sdkFillSucceeded = false;
-            if (stackTarget)
+            if (stackTarget && AutoMag_IsValidObject(stackTarget))
             {
                 int32_t added = TryFillViaSDK(stackTarget, "stackComp", needed);
                 stackedArr = GetStackArr();
@@ -2293,6 +2315,12 @@ namespace Mod
                 int32_t stillNeeded = stackedArr ? (capacity - stackedArr->NumElements) : needed;
                 if (stillNeeded > 0)
                 {
+                    if (!AutoMag_IsValidObject(magazineActor))
+                    {
+                        LOG_WARN("[AutoMag][Fill] Magazine actor became invalid before actor fill; aborting");
+                        return false;
+                    }
+
                     int32_t added = TryFillViaSDK(magazineActor, "actor", stillNeeded);
                     stackedArr = GetStackArr();
                     if (stackedArr && stackedArr->NumElements >= capacity)
@@ -2368,10 +2396,13 @@ namespace Mod
 
             // Fire visual update on stack component (or actor as fallback)
             SDK::UObject* fireTarget = stackTarget ? stackTarget : static_cast<SDK::UObject*>(magazineActor);
+            if (!AutoMag_IsValidObject(fireTarget))
+                return true;
+
             SDK::UFunction* fireFn = nullptr;
             try { fireFn = fireTarget->Class->GetFunction("RadiusItemStackComponent", "FireOnStackChanged"); }
             catch (...) {}
-            if (!fireFn && stackTarget)
+            if (!fireFn && stackTarget && AutoMag_IsValidObject(magazineActor))
             {
                 try { fireFn = magazineActor->Class->GetFunction("RadiusItemStackComponent", "FireOnStackChanged"); }
                 catch (...) {}
@@ -2384,7 +2415,7 @@ namespace Mod
             else
             {
                 // Fallback: cast and call directly
-                if (stackTarget)
+                if (stackTarget && AutoMag_IsValidObject(stackTarget))
                 {
                     try
                     {
@@ -2405,6 +2436,9 @@ namespace Mod
         // actorToHolster = the item actor being placed
         static void AutoMag_ProcessHolster(SDK::UObject* object, SDK::ARadiusGrippableActorBase* actorToHolster)
         {
+            if (!AutoMag_IsValidObject(object) || !AutoMag_IsValidObject(actorToHolster))
+                return;
+
             // ---- Classify holster: skip weapon mag slots and hand holsters ----
             // Weapon mag slots (BPC_RadiusMagazineSlot_C) caused crashes previously.
             // Hand holsters would trigger on every pickup which is noisy.
@@ -2603,6 +2637,9 @@ namespace Mod
         // itemActor = the item being placed
         static void AutoMag_ProcessContainer(SDK::UObject* object, SDK::AActor* itemActor)
         {
+            if (!AutoMag_IsValidObject(object) || !AutoMag_IsValidObject(itemActor))
+                return;
+
             const std::string containerClass = object->Class ? object->Class->GetName() : "<null-class>";
             const std::string containerName  = object->GetName();
 

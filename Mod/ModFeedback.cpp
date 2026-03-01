@@ -315,6 +315,150 @@ namespace Mod::ModFeedback
             SpatialAudio::Tick();
         }
 
+        // -----------------------------------------------------------------
+        // Right-hand widget display — replaces ShowSubtitles as primary output
+        // Uses W_GripDebug_R with a WBP_Confirmation widget, exactly like VRMenuSubsystem
+        // uses W_GripDebug_L for the mod menu.
+        // -----------------------------------------------------------------
+
+        static SDK::UWBP_Confirmation_C* gRightWidget = nullptr;  // owned by UE GC
+        static uint64_t gRightWidgetExpiryMs = 0;                 // 0 = no active message
+
+        // Lazily create and attach the WBP_Confirmation widget to W_GripDebug_R.
+        // Returns true if gRightWidget is ready to use.
+        static bool EnsureRightHandWidget()
+        {
+            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
+            if (!player || player->IsDefaultObject())
+            {
+                gRightWidget = nullptr;
+                return false;
+            }
+
+            SDK::UWidgetComponent* comp = player->W_GripDebug_R;
+            if (!comp)
+            {
+                static bool warnedOnce = false;
+                if (!warnedOnce) { warnedOnce = true; LOG_WARN("[ModFeedback][RH] W_GripDebug_R is null on player"); }
+                gRightWidget = nullptr;
+                return false;
+            }
+
+            if (gRightWidget)
+                return true;
+
+            SDK::UWorld* world = Mod::GameContext::GetWorld();
+            if (!world) return false;
+
+            SDK::APlayerController* pc = SDK::UGameplayStatics::GetPlayerController(world, 0);
+            if (!pc) return false;
+
+            SDK::UClass* widgetClass = SDK::UWBP_Confirmation_C::StaticClass();
+            if (!widgetClass)
+            {
+                LOG_WARN("[ModFeedback][RH] WBP_Confirmation_C class not found");
+                return false;
+            }
+
+            SDK::UUserWidget* widget = SDK::UWidgetBlueprintLibrary::Create(world, widgetClass, pc);
+            if (!widget || !widget->IsA(widgetClass))
+            {
+                LOG_WARN("[ModFeedback][RH] Failed to create WBP_Confirmation_C widget");
+                return false;
+            }
+
+            gRightWidget = static_cast<SDK::UWBP_Confirmation_C*>(widget);
+            comp->SetWidget(gRightWidget);
+            comp->SetVisibility(true, true);
+            comp->SetHiddenInGame(false, true);
+            comp->SetTwoSided(true);
+
+            // Fixed draw size suitable for short messages
+            SDK::FVector2D drawSize{ 500.0, 500.0 };
+            comp->SetDrawSize(drawSize);
+
+            // Set static header and hide Yes/No buttons
+            {
+                SDK::FString hdrStr(L"MOD");
+                SDK::FText hdrText = SDK::UKismetTextLibrary::Conv_StringToText(hdrStr);
+                gRightWidget->Title = hdrText;
+                if (gRightWidget->Txt_Confirmation_Title)
+                {
+                    gRightWidget->Txt_Confirmation_Title->SetText(hdrText);
+                    SDK::FSlateColor col;
+                    col.SpecifiedColor = SDK::FLinearColor{0.5f, 0.85f, 1.0f, 1.0f};
+                    gRightWidget->Txt_Confirmation_Title->SetColorAndOpacity(col);
+                }
+                SDK::FString emptyStr(L"");
+                SDK::FText emptyText = SDK::UKismetTextLibrary::Conv_StringToText(emptyStr);
+                gRightWidget->Yes_Text = emptyText;
+                gRightWidget->No_Text = emptyText;
+            }
+
+            LOG_INFO("[ModFeedback][RH] Right-hand message widget created and attached to W_GripDebug_R");
+            return true;
+        }
+
+        // Display text on W_GripDebug_R for the given duration.
+        // Returns true if the widget rendered the message (false = widget not available).
+        static bool ShowOnRightWidget(const wchar_t* text, float seconds)
+        {
+            if (!EnsureRightHandWidget() || !gRightWidget)
+                return false;
+
+            std::wstring msg(text);
+            SDK::FString msgStr = MakeStableFString(msg);
+            SDK::FText msgText = SDK::UKismetTextLibrary::Conv_StringToText(msgStr);
+
+            gRightWidget->Description = msgText;
+            if (gRightWidget->Txt_TextConfirm)
+            {
+                gRightWidget->Txt_TextConfirm->SetText(msgText);
+                SDK::FTextBlockStyle style = gRightWidget->Txt_TextConfirm->WidgetStyle;
+                style.ColorAndOpacity.SpecifiedColor = SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f};
+                gRightWidget->Txt_TextConfirm->SetWidgetStyle(style);
+            }
+
+            gRightWidgetExpiryMs = NowTickMs() + static_cast<uint64_t>(seconds * 1000.0f);
+
+            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
+            if (player && player->W_GripDebug_R)
+            {
+                if (!player->W_GripDebug_R->bVisible)
+                {
+                    player->W_GripDebug_R->SetVisibility(true, true);
+                }
+                player->W_GripDebug_R->RequestRedraw();
+            }
+            return true;
+        }
+
+        // Called every tick. Clears the right-hand widget text once the message duration expires.
+        static void TickRightWidget()
+        {
+            if (!gRightWidget || gRightWidgetExpiryMs == 0)
+                return;
+            if (NowTickMs() < gRightWidgetExpiryMs)
+                return;
+
+            gRightWidgetExpiryMs = 0;
+
+            SDK::FString emptyStr(L"");
+            SDK::FText emptyText = SDK::UKismetTextLibrary::Conv_StringToText(emptyStr);
+            gRightWidget->Description = emptyText;
+            if (gRightWidget->Txt_TextConfirm)
+                gRightWidget->Txt_TextConfirm->SetText(emptyText);
+            
+            
+
+            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
+            if (player && player->W_GripDebug_R)
+            {
+                player->W_GripDebug_R->SetVisibility(false, true);
+                player->W_GripDebug_R->RequestRedraw();
+            }
+        }
+
         // Register a 3D sound handle as tracked against an actor for position updates.
         static void TrackActorSound(SDK::AActor* actor, SpatialAudio::SoundHandle handle, const std::string& descriptor)
         {
@@ -565,15 +709,10 @@ namespace Mod::ModFeedback
             return;
         }
 
-        if (!SDK::UGameplayStatics::AreSubtitlesEnabled())
-        {
-            SDK::UGameplayStatics::SetSubtitlesEnabled(true);
-            LOG_INFO("[ModFeedback] Subtitles were disabled; forced enabled for mod feedback");
-        }
 
         float duration = seconds;
-        if (duration <= 0.05f)
-            duration = 2.0f;
+        if (duration <= 3.0f)
+            duration = 3.0f;
         if (duration > 20.0f)
             duration = 20.0f;
 
@@ -591,14 +730,38 @@ namespace Mod::ModFeedback
             msgText = SDK::UKismetTextLibrary::Conv_StringToText(stable);
         }
 
+        // --- Primary: right-hand widget --- //
+        bool wroteToWidget = false;
+        try
+        {
+            wroteToWidget = ShowOnRightWidget(msgW.c_str(), duration);
+        }
+        catch (...)
+        {
+            LOG_WARN("[ModFeedback] Exception in ShowOnRightWidget; falling back to ShowSubtitles");
+        }
+        
+
         static int showLogs = 0;
         if (showLogs < 200)
         {
             ++showLogs;
-            LOG_INFO("[ModFeedback] ShowSubtitles(System) player='" << player->GetFullName() << "' dur=" << duration << " chars=" << (int)msgW.size());
+            if (wroteToWidget)
+                LOG_INFO("[ModFeedback] ShowOnRightWidget dur=" << duration << " chars=" << (int)msgW.size());
+            else
+                LOG_INFO("[ModFeedback] ShowSubtitles(fallback) player='" << player->GetFullName() << "' dur=" << duration << " chars=" << (int)msgW.size());
         }
 
-        player->ShowSubtitles(SDK::ESubtitleInstigator::System, msgText, duration);
+        // --- Fallback: ShowSubtitles if widget not yet available --- //
+        if (!wroteToWidget)
+        {
+            if (!SDK::UGameplayStatics::AreSubtitlesEnabled())
+            {
+                SDK::UGameplayStatics::SetSubtitlesEnabled(true);
+                LOG_INFO("[ModFeedback] Subtitles were disabled; forced enabled for mod feedback");
+            }
+            player->ShowSubtitles(SDK::ESubtitleInstigator::System, msgText, duration);
+        }
     }
 
     void StartSubtitleTestSequence(uint32_t intervalMs)
@@ -653,6 +816,9 @@ namespace Mod::ModFeedback
 
         // Update 3D sound positions and clean up stale entries
         UpdateTrackedActorPositions();
+
+        // Expire right-hand widget message if its duration has elapsed
+        TickRightWidget();
 
         if (ShouldSuppressSubtitlesNow())
         {

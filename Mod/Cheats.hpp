@@ -156,6 +156,7 @@ namespace Mod
 
         SDK::UWorld* lastBulletTimeWorld_{nullptr};
         SDK::ABP_RadiusPlayerCharacter_Gameplay_C* lastBulletTimePlayer_{nullptr};
+        std::chrono::steady_clock::time_point nextAnomalySuppressionAt_{};
         uint32_t portableLightLogCounter_{0};
     };
 }

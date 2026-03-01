@@ -565,9 +565,7 @@ namespace Mod
             ApplyPortableLightBrightness(world, player);
         }
 
-        // Anomaly suppression: destroy anomalies and disable spawners every tick while cheat is active.
-        // Throttled internally -- the first time it runs it clears everything, subsequent checks are fast
-        // (GetAllActorsOfClass returns empty arrays once everything is destroyed/disabled).
+        // Anomaly suppression: first run is immediate when enabled, then throttled to every 30 seconds.
         ApplyAnomalySuppression(world);
     }
 
@@ -839,7 +837,20 @@ namespace Mod
 
     void Cheats::ApplyAnomalySuppression(SDK::UWorld* world)
     {
-        if (!anomaliesDisabled_ || !world) return;
+        if (!world) return;
+
+        if (!anomaliesDisabled_)
+        {
+            nextAnomalySuppressionAt_ = std::chrono::steady_clock::time_point{};
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < nextAnomalySuppressionAt_)
+        {
+            return;
+        }
+        nextAnomalySuppressionAt_ = now + std::chrono::seconds(30);
 
         Mod::ScopedProcessEventGuard guard;
 
@@ -895,6 +906,7 @@ namespace Mod
                 }
             }
         }
+
     }
 
     // -----------------------------------------------------------------------

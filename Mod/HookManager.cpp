@@ -2933,17 +2933,17 @@ namespace Mod
             const double axisX = axisDoubles[0];  // left/right (strafe) — ignore for vertical nav
             const double axisY = axisDoubles[1];  // forward/backward — use as vertical nav axis
 
-            // Throttled logging so every event is traceable without flooding
-            {
-                static auto lastNavLog = std::chrono::steady_clock::time_point{};
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavLog).count() > 100)
-                {
-                    lastNavLog = now;
-                    LOG_INFO("[VRMenu:Nav] X(strafe)=" << axisX << " Y(fwd)=" << axisY
-                             << " -> thumbstickY=" << axisY);
-                }
-            }
+            // // Throttled logging so every event is traceable without flooding
+            // {
+            //     static auto lastNavLog = std::chrono::steady_clock::time_point{};
+            //     auto now = std::chrono::steady_clock::now();
+            //     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavLog).count() > 100)
+            //     {
+            //         lastNavLog = now;
+            //         LOG_INFO("[VRMenu:Nav] X(strafe)=" << axisX << " Y(fwd)=" << axisY
+            //                  << " -> thumbstickY=" << axisY);
+            //     }
+            // }
 
             menu->OnNavigate(static_cast<float>(axisY));
 

@@ -129,11 +129,12 @@ namespace Mod
         // edge clears the hand grip even if the game blueprint resets the pivot.
         // Scale with item count so taller menus float higher.
         // Units are UE cm. Each item is ~5 cm, we lift by 1 cm per item as a safety margin.
-        const float kLiftPerItemCm = 1.0f;
+        const float kLiftPerItemCm = 2.0f;
         float zLiftCm = static_cast<float>(itemCount) * kLiftPerItemCm;
         SDK::FHitResult dummyHit{};
         player->W_GripDebug_L->K2_SetRelativeLocation(
-            SDK::FVector{0.0f, 0.0f, zLiftCm}, false, &dummyHit, true);
+            SDK::FVector{zLiftCm, 0.0f, 0.0f}, false, &dummyHit, true);
+        // frame of reference is X forward along it's axis, Y is right, Z is up back towards the player, so we shift forward in X by zLiftCm to lift the menu up away from the hand
 
         LOG_INFO("[VRMenu] DrawSize=(" << newSize.X << "x" << height
                  << ") pivot=(" << pivot.X << "," << pivot.Y

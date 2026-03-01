@@ -14,6 +14,10 @@ AILEARNINGS:
   When closed, we return false so normal movement works.
 - Stick rebound fix: thumbstick flick caused opposite-direction bounce. Fixed with direction latch:
   track lastNavDirection_ (CENTER/UP/DOWN), require return to deadzone before accepting new direction.
+- Thumbstick dominant-axis gate: reading only axisValues[0] caused left/right stick movement to
+  spuriously trigger vertical navigation. Fix: read both axisValues[0] and axisValues[1], use the
+  one with 1.4x larger magnitude. If neither dominates (diagonal), suppress navigation entirely.
+  This is applied in Hook_VRMenu_Movement (HookManager.cpp), not in OnNavigate itself.
 - IA_Run_Toggle (_31) and IA_Trigger_Left (_24) were unreliable for selection — events may not fire or
   value format is wrong. Replaced with B/Y dual-purpose approach.
 - Menu header duplication: title AND description both showed "=== MOD MENU ===". Fixed: only title has it.
@@ -21,6 +25,13 @@ AILEARNINGS:
   player's PlayerDebugWidget. This is highly experimental.
 - VR pointer: scan GObjects for URadiusWidgetInteractionComponent at runtime. If found on gameplay
   character, reuse it for pointer interaction with our menu widget. Game may not spawn one in gameplay.
+- Menu height clipping: W_GripDebug_L widget anchors at the hand and (by default, pivot 0.5,0.5)
+  extends equally up and down. As menu grows taller, bottom clips into hand. Fix: SetPivot(0.5, 0.95)
+  anchors near-bottom at the attachment point so menu extends upward. Redundant K2_SetRelativeLocation
+  adds a per-item Z lift (cm) for additional margin. Both are applied in UpdateWidgetDrawSize().
+- Menu jitter: W_GripDebug_L is rigidly attached to the player's hand bone with no smoothing applied.
+  All VR controller tracking jitter (optical noise, occlusion) passes 1:1 to the menu. No fix here
+  without detaching the menu from the hand and implementing a lerped/smoothed world-space anchor.
 */
 
 #include "VRMenuSubsystem.hpp"
@@ -101,12 +112,32 @@ namespace Mod
         if (!player || !player->W_GripDebug_L)
             return;
 
-        // 200 pixels per item, minimum 1000
         int itemCount = static_cast<int>(items_.size());
         float height = (std::max)(1000.0f, static_cast<float>(itemCount * 200));
         
         SDK::FVector2D newSize{600.0, height};
         player->W_GripDebug_L->SetDrawSize(newSize);
+
+        // Pivot adjustment: anchor the BOTTOM of the widget at the hand attachment point
+        // so the menu extends UPWARD from the hand rather than clipping downward into it.
+        // Pivot(0.5, 1.0) = bottom-center at component origin.
+        // Adjust toward 0.9 to leave a small margin below the hand for readability.
+        SDK::FVector2D pivot{0.5, 0.95};
+        player->W_GripDebug_L->SetPivot(pivot);
+
+        // Redundant position offset: shift the widget component upward so the bottom
+        // edge clears the hand grip even if the game blueprint resets the pivot.
+        // Scale with item count so taller menus float higher.
+        // Units are UE cm. Each item is ~5 cm, we lift by 1 cm per item as a safety margin.
+        const float kLiftPerItemCm = 1.0f;
+        float zLiftCm = static_cast<float>(itemCount) * kLiftPerItemCm;
+        SDK::FHitResult dummyHit{};
+        player->W_GripDebug_L->K2_SetRelativeLocation(
+            SDK::FVector{0.0f, 0.0f, zLiftCm}, false, &dummyHit, true);
+
+        LOG_INFO("[VRMenu] DrawSize=(" << newSize.X << "x" << height
+                 << ") pivot=(" << pivot.X << "," << pivot.Y
+                 << ") zLift=" << zLiftCm << "cm");
     }
 
     // =========================================================================
@@ -321,6 +352,29 @@ namespace Mod
                 if (c) c->ToggleAnomaliesDisabled();
             }
         });
+        // light scaling!
+        items_.push_back({"Portable Light Intensity x2.0",
+            []() -> std::string {
+                Cheats* c = GetCheats();
+                return c ? std::to_string(c->GetPortableLightIntensityScale()) : "1.0";
+            },
+            []() {
+                Cheats* c = GetCheats();
+                if (c) c->SetPortableLightIntensityScale(2.0f);
+            }
+        });
+        items_.push_back({ "Portable Light Intensity x0.5",
+            []() -> std::string {
+                Cheats* c = GetCheats();
+                return c ? std::to_string(c->GetPortableLightIntensityScale()) : "1.0";
+            },
+            []() {
+                Cheats* c = GetCheats();
+                if (c) c->SetPortableLightIntensityScale(0.5f);
+            }
+			});
+            
+
     }
 
     // =========================================================================
@@ -752,19 +806,31 @@ namespace Mod
         // Anti-rebound: when inside deadzone, reset direction to CENTER
         if (std::abs(thumbstickY) < deadzone)
         {
+            if (lastNavDirection_ != NavDirection::CENTER)
+            {
+                LOG_INFO("[VRMenu:OnNavigate] y=" << thumbstickY
+                         << " inside deadzone — resetting from "
+                         << (lastNavDirection_ == NavDirection::UP ? "UP" : "DOWN")
+                         << " to CENTER");
+            }
             lastNavDirection_ = NavDirection::CENTER;
             return true; // suppress movement while menu is open
         }
 
         // Determine intended direction
-        NavDirection intended = (thumbstickY > 0) ? NavDirection::DOWN : NavDirection::UP;
+        NavDirection intended = (thumbstickY > 0) ? NavDirection::UP : NavDirection::DOWN;
+        const char* intendedStr = (intended == NavDirection::DOWN) ? "DOWN" : "UP";
+        const char* lastStr = (lastNavDirection_ == NavDirection::CENTER) ? "CENTER"
+                            : (lastNavDirection_ == NavDirection::DOWN)   ? "DOWN" : "UP";
 
         // Anti-rebound: only accept navigation if we were at CENTER or same direction
         // This prevents stick overshoot from triggering opposite navigation
         if (lastNavDirection_ != NavDirection::CENTER && lastNavDirection_ != intended)
         {
-            // Stick went from one direction to opposite without passing through center
-            // This is a rebound — ignore it
+            LOG_INFO("[VRMenu:OnNavigate] y=" << thumbstickY
+                     << " REBOUND BLOCKED: intended=" << intendedStr
+                     << " last=" << lastStr
+                     << " (stick must return to CENTER before reversing direction)");
             return true;
         }
 
@@ -776,6 +842,8 @@ namespace Mod
 
         lastNavTime_ = now;
         lastNavDirection_ = intended;
+
+        const int prevIndex = selectedIndex_;
 
         if (intended == NavDirection::DOWN)
         {
@@ -789,6 +857,11 @@ namespace Mod
             if (selectedIndex_ < 0)
                 selectedIndex_ = static_cast<int>(items_.size()) - 1;
         }
+
+        LOG_INFO("[VRMenu:OnNavigate] y=" << thumbstickY
+                 << " direction=" << intendedStr
+                 << " index " << prevIndex << " -> " << selectedIndex_
+                 << " (of " << items_.size() << ")");
 
         // Update POC9 widget to reflect new selection
         if (poc9Enabled_ && poc9WidgetCreated_)
@@ -1005,11 +1078,9 @@ namespace Mod
                     LOG_INFO("[VRMenu] Widget tree root: " << root->GetFullName());
 
                     // Check if root is a text block
-                    SDK::UTextBlock* textBlock = static_cast<SDK::UTextBlock*>(root);
-                    // Validate by checking the class name
-                    std::string rootClassName = root->Class ? root->Class->GetName() : "???";
-                    if (rootClassName.find("TextBlock") != std::string::npos)
+                    if (root->IsA(SDK::UTextBlock::StaticClass()))
                     {
+                        SDK::UTextBlock* textBlock = static_cast<SDK::UTextBlock*>(root);
                         cachedTextBlock_ = textBlock;
                         cachedWidgetComp_ = debugWidget;
                         LOG_INFO("[VRMenu] Found TextBlock root widget — will use for menu text");
@@ -1017,6 +1088,7 @@ namespace Mod
                     }
                     else
                     {
+                        std::string rootClassName = root->Class ? root->Class->GetName() : "???";
                         LOG_INFO("[VRMenu] Root widget is " << rootClassName << ", not TextBlock. Attempting GObjects scan for TextBlock...");
                     }
                 }
@@ -1029,6 +1101,13 @@ namespace Mod
 
         // Fallback: scan GObjects for any UTextBlock we could use
         LOG_INFO("[VRMenu] Scanning GObjects for UTextBlock instances...");
+        if (!SDK::UObject::GObjects)
+        {
+            LOG_WARN("[VRMenu] GObjects is null; cannot scan for TextBlock instances");
+            widgetSearchFailed_ = true;
+            return;
+        }
+
         int totalObjects = SDK::UObject::GObjects->Num();
         if (totalObjects <= 0)
         {
@@ -1193,6 +1272,12 @@ namespace Mod
             return;
         }
 
+        if (!widget->IsA(SDK::UWBP_Confirmation_C::StaticClass()))
+        {
+            LOG_WARN("[VRMenu:POC9] Created widget is not UWBP_Confirmation_C");
+            return;
+        }
+
         cachedPoc9Widget_ = static_cast<SDK::UWBP_Confirmation_C*>(widget);
         LOG_INFO("[VRMenu:POC9] Created widget: " << widget->GetFullName());
 
@@ -1349,6 +1434,12 @@ namespace Mod
         if (!wicClass)
         {
             LOG_WARN("[VRMenu:Pointer] UWidgetInteractionComponent::StaticClass() is null");
+            return;
+        }
+
+        if (!SDK::UObject::GObjects)
+        {
+            LOG_WARN("[VRMenu:Pointer] GObjects is null; cannot scan for pointers");
             return;
         }
 

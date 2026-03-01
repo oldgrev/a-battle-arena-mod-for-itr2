@@ -231,7 +231,7 @@ namespace Mod
             {
                 SDK::TArray<SDK::AActor*> actors;
                 SDK::UGameplayStatics::GetAllActorsOfClass(world, SDK::ARadiusGameDataReplicator::StaticClass(), &actors);
-                if (actors.Num() > 0)
+                if (actors.Num() > 0 && actors[0] && actors[0]->IsA(SDK::ARadiusGameDataReplicator::StaticClass()))
                     replicator = static_cast<SDK::ARadiusGameDataReplicator*>(actors[0]);
             }
             if (replicator)
@@ -263,7 +263,7 @@ namespace Mod
             {
                 SDK::TArray<SDK::AActor*> actors;
                 SDK::UGameplayStatics::GetAllActorsOfClass(world, SDK::ARadiusGameDataReplicator::StaticClass(), &actors);
-                if (actors.Num() > 0)
+                if (actors.Num() > 0 && actors[0] && actors[0]->IsA(SDK::ARadiusGameDataReplicator::StaticClass()))
                     replicator = static_cast<SDK::ARadiusGameDataReplicator*>(actors[0]);
             }
             if (replicator)
@@ -733,6 +733,13 @@ namespace Mod
                 LOG_ERROR("[Cheats] PlayerStatsComponent not found on player!");
                 return;
             }
+
+            if (!statsComponent->IsA(SDK::UPlayerStatsComponent::StaticClass()))
+            {
+                LOG_ERROR("[Cheats] PlayerStatsComponent lookup returned unexpected type");
+                return;
+            }
+
             player->PlayerStats = static_cast<SDK::UPlayerStatsComponent *>(statsComponent);
         }
 
@@ -849,6 +856,16 @@ namespace Mod
             {
                 if (data[i] && SDK::UKismetSystemLibrary::IsValid(data[i]))
                 {
+                    // only destroy class BP_Anomaly_Portal_C, BP_Anomaly_Reflector_C, BP_Anomaly_ForestHedgehog_C and BP_AnomalyBallLightning_ForSpawners_C
+                    if (data[i]->GetName().find("BP_Anomaly_Portal_C") == std::string::npos &&
+                        data[i]->GetName().find("BP_Anomaly_Reflector_C") == std::string::npos &&
+                        data[i]->GetName().find("BP_Anomaly_ForestHedgehog_C") == std::string::npos &&
+                        data[i]->GetName().find("BP_AnomalyBallLightning_ForSpawners_C") == std::string::npos)
+                    {
+                        continue;
+                    }
+
+                    LOG_INFO("[Cheats] ApplyAnomalySuppression: destroying anomaly " << data[i]->GetName());
                     data[i]->K2_DestroyActor();
                 }
             }

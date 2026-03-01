@@ -876,7 +876,7 @@ namespace Mod::Arena
                     }
                     
                     // Ensure they are in combat state
-                    if (actor->IsA(SDK::APawn::StaticClass()))
+                    if (actor->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
                     {
                         auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(actor);
                         if (aiChar->AIController)
@@ -1047,7 +1047,7 @@ namespace Mod::Arena
                 LOG_INFO("[Arena] FinishSpawningActor for " << className);
                 SDK::UGameplayStatics::FinishSpawningActor(actor, transform, SDK::ESpawnActorScaleMethod::SelectDefaultAtRuntime);
                 
-                if (actor->IsA(SDK::APawn::StaticClass()))
+                if (actor->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
                 {
                     LOG_INFO("[Arena] SpawnDefaultController for " << className);
                     static_cast<SDK::APawn*>(actor)->SpawnDefaultController();
@@ -1061,6 +1061,10 @@ namespace Mod::Arena
                     
                     LOG_INFO("[Arena] BuffNPCAwareness for " << className);
                     BuffNPCAwareness(static_cast<SDK::APawn*>(actor));
+                }
+                else
+                {
+                    LOG_WARN("[Arena] Spawned actor is not ARadiusAICharacterBase: " << className);
                 }
 
                 {
@@ -1104,8 +1108,13 @@ namespace Mod::Arena
 
     void ArenaSubsystem::SetGroupAttackLimit(SDK::UWorld* world, int limit)
     {
+        if (!world) return;
+
         Mod::ScopedProcessEventGuard guard;
-        auto* coord = static_cast<SDK::URadiusAICoordinationSubsystem*>(SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass()));
+        SDK::UObject* coordObj = SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass());
+        auto* coord = (coordObj && coordObj->IsA(SDK::URadiusAICoordinationSubsystem::StaticClass()))
+            ? static_cast<SDK::URadiusAICoordinationSubsystem*>(coordObj)
+            : nullptr;
         if (coord && coord->NPCConfig)
         {
             coord->NPCConfig->MaxNPCNumCanAttackAtTime = limit; // not entirely sure this is working, i'll need some tracing and stuff later.
@@ -1144,7 +1153,10 @@ namespace Mod::Arena
 
         Mod::ScopedProcessEventGuard guard;
 
-        auto* timeSubsystem = static_cast<SDK::URadiusTimeSubsystem*>(SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusTimeSubsystem::StaticClass()));
+        SDK::UObject* timeSubsystemObj = SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusTimeSubsystem::StaticClass());
+        auto* timeSubsystem = (timeSubsystemObj && timeSubsystemObj->IsA(SDK::URadiusTimeSubsystem::StaticClass()))
+            ? static_cast<SDK::URadiusTimeSubsystem*>(timeSubsystemObj)
+            : nullptr;
         if (timeSubsystem && lock)
         {
             timeSubsystem->DebugSetHour(12.0f);
@@ -1164,8 +1176,10 @@ namespace Mod::Arena
         int foundControllers = 0;
         for (int32_t i = 0; i < count; ++i)
         {
-            auto* ctrl = static_cast<SDK::ARadiusTimeController*>(data[i]);
-            if (!ctrl) continue;
+            SDK::AActor* controllerActor = data[i];
+            if (!controllerActor || !controllerActor->IsA(SDK::ARadiusTimeController::StaticClass())) continue;
+
+            auto* ctrl = static_cast<SDK::ARadiusTimeController*>(controllerActor);
             foundControllers++;
             ctrl->SetClockEnable(!lock);
             ctrl->SetDebugTimeScale(lock ? 0.0f : 1.0f);

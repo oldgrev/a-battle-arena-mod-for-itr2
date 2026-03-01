@@ -405,7 +405,7 @@ namespace Mod::Friend
 
             SDK::UGameplayStatics::FinishSpawningActor(actor, spawnTransform, SDK::ESpawnActorScaleMethod::SelectDefaultAtRuntime);
 
-            if (actor->IsA(SDK::APawn::StaticClass()))
+            if (actor->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
             {
                 static_cast<SDK::APawn*>(actor)->SpawnDefaultController();
 
@@ -443,9 +443,9 @@ namespace Mod::Friend
             }
             else
             {
-                // Not a pawn -- destroy and skip.
+                // Not an AI character -- destroy and skip.
                 actor->K2_DestroyActor();
-                LOG_WARN("[Friend] SpawnFriend: spawned actor is not a pawn: " << className);
+                LOG_WARN("[Friend] SpawnFriend: spawned actor is not ARadiusAICharacterBase: " << className);
             }
         }
 
@@ -654,6 +654,11 @@ namespace Mod::Friend
             target.Z = playerLoc.Z;
         }
 
+        if (!e.Actor->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
+        {
+            return;
+        }
+
         auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(e.Actor);
         if (aiChar->AIController)
         {
@@ -685,6 +690,11 @@ namespace Mod::Friend
                 target))
         {
             LOG_WARN("[Friend] TickReposition: could not find ground position near player");
+            return;
+        }
+
+        if (!e.Actor->IsA(SDK::ARadiusAICharacterBase::StaticClass()))
+        {
             return;
         }
 
@@ -805,6 +815,7 @@ namespace Mod::Friend
         e.nextIdleResetTime = time + Mod::Tuning::kFriendIdleResetIntervalSeconds;
 
         if (!e.Actor || !SDK::UKismetSystemLibrary::IsValid(e.Actor)) return;
+        if (!e.Actor->IsA(SDK::ARadiusAICharacterBase::StaticClass())) return;
         auto* aiChar = static_cast<SDK::ARadiusAICharacterBase*>(e.Actor);
 
         // FOLLOW-FIX: Only reset to Idle when not actively following.

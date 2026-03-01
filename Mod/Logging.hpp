@@ -99,12 +99,13 @@ namespace Mod
 
 // Convenience macros
 #define LOG_INFO(msg)                       \
-    do                                      \
-    {                                       \
-        std::ostringstream _oss;            \
-        _oss << "[mod] " << msg;            \
-        Mod::Logger::Get().Log(_oss.str()); \
-    } while (0)
+    do {} while (0)
+    // do                                      \
+    // {                                       \
+    //     std::ostringstream _oss;            \
+    //     _oss << "[mod] " << msg;            \
+    //     Mod::Logger::Get().Log(_oss.str()); \
+    // } while (0)
 
 #define LOG_ERROR(msg)                      \
     do                                      \

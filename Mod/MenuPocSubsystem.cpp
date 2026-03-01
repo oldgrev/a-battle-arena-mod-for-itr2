@@ -49,6 +49,7 @@ namespace Mod
                     items.push_back({L"Bullet Time", cheats->IsBulletTimeActive()});
                     items.push_back({L"No Clip", cheats->IsNoClipActive()});
                     items.push_back({L"Auto Mag", cheats->IsAutoMagActive()});
+                    items.push_back({L"Anomalies Disabled", cheats->IsAnomaliesDisabledActive()});
                 }
                 else
                 {
@@ -91,6 +92,7 @@ namespace Mod
             T* GetWorldSubsystem(SDK::UWorld* world)
             {
                 if (!world) return nullptr;
+                if (!SDK::UObject::GObjects) return nullptr;
                 
                 // Try to find subsystem in GObjects
                 SDK::UClass* targetClass = T::StaticClass();
@@ -308,7 +310,7 @@ namespace Mod
             LOG_INFO("[MenuPoc] " << indent << "Widget: " << widgetName << " [" << className << "]");
             
             // Check if this is a TextBlock
-            if (className == "TextBlock" || className.find("TextBlock") != std::string::npos)
+            if (widget->IsA(SDK::UTextBlock::StaticClass()))
             {
                 SDK::UTextBlock* textBlock = static_cast<SDK::UTextBlock*>(widget);
                 foundTextBlocks.push_back(textBlock);
@@ -320,7 +322,6 @@ namespace Mod
             }
             
             // Check if this is a PanelWidget with children
-            SDK::UPanelWidget* panel = static_cast<SDK::UPanelWidget*>(widget);
             // We need to check if it's actually a panel by checking class hierarchy
             // For safety, try to call GetChildrenCount and catch if it fails
             try
@@ -334,8 +335,9 @@ namespace Mod
                                    className.find("Panel") != std::string::npos ||
                                    className.find("Box") != std::string::npos);
                 
-                if (isPanelLike)
+                if (isPanelLike && widget->IsA(SDK::UPanelWidget::StaticClass()))
                 {
+                    SDK::UPanelWidget* panel = static_cast<SDK::UPanelWidget*>(widget);
                     int childCount = panel->GetChildrenCount();
                     LOG_INFO("[MenuPoc] " << indent << "  (Panel with " << childCount << " children)");
                     
@@ -474,6 +476,13 @@ namespace Mod
                 
                 // Still make the panel visible and scan GObjects for TextBlocks that might be associated
                 LOG_INFO("[MenuPoc] Scanning GObjects for TextBlock instances near this widget...");
+
+                if (!SDK::UObject::GObjects)
+                {
+                    LOG_WARN("[MenuPoc] GObjects unavailable for TextBlock scan");
+                    result << "POC2 INFO: GObjects unavailable for fallback TextBlock scan";
+                    return result.str();
+                }
                 
                 int textBlockCount = 0;
                 int totalObjects = SDK::UObject::GObjects->Num();
@@ -601,6 +610,13 @@ namespace Mod
 
             int foundCount = 0;
             SDK::URadiusWidgetComponent* targetWidget = nullptr;
+
+            if (!SDK::UObject::GObjects)
+            {
+                result << "POC3 FAILED: GObjects unavailable";
+                LOG_WARN("[MenuPoc] " << result.str());
+                return result.str();
+            }
             
             for (int i = 0; i < SDK::UObject::GObjects->Num() && foundCount < 20; ++i)
             {
@@ -698,6 +714,13 @@ namespace Mod
 
             LOG_INFO("[MenuPoc] Spawned BP_IngameMenu_C: " << menuActor->GetFullName());
 
+            if (!menuActor->IsA(SDK::ABP_IngameMenu_C::StaticClass()))
+            {
+                result << "POC4 FAILED: Spawned actor is not BP_IngameMenu_C";
+                LOG_WARN("[MenuPoc] " << result.str());
+                return result.str();
+            }
+
             // Cast to specific type and check properties
             SDK::ABP_IngameMenu_C* ingameMenu = static_cast<SDK::ABP_IngameMenu_C*>(menuActor);
             if (ingameMenu->VoiceChatPanel)
@@ -743,7 +766,7 @@ namespace Mod
                 if (bpInfoPanelClass)
                 {
                     SDK::AActor* bpInfoPanel = SDK::UGameplayStatics::GetActorOfClass(world, bpInfoPanelClass);
-                    if (bpInfoPanel)
+                    if (bpInfoPanel && bpInfoPanel->IsA(SDK::AInfoPanel::StaticClass()))
                     {
                         infoPanel = static_cast<SDK::AInfoPanel*>(bpInfoPanel);
                     }
@@ -872,6 +895,13 @@ namespace Mod
 
             LOG_INFO("[MenuPoc] Spawned BPA_FaceFollowingMenu_C: " << menuActor->GetFullName());
 
+            if (!menuActor->IsA(SDK::ABPA_FaceFollowingMenu_C::StaticClass()))
+            {
+                result << "POC6 FAILED: Spawned actor is not BPA_FaceFollowingMenu_C";
+                LOG_WARN("[MenuPoc] " << result.str());
+                return result.str();
+            }
+
             // Cast and examine
             SDK::ABPA_FaceFollowingMenu_C* faceMenu = static_cast<SDK::ABPA_FaceFollowingMenu_C*>(menuActor);
             
@@ -933,6 +963,13 @@ namespace Mod
 
             // Try to find WBP_CheatPanel class to create
             SDK::UClass* cheatPanelWidgetClass = nullptr;
+
+            if (!SDK::UObject::GObjects)
+            {
+                result << "POC7 FAILED: GObjects unavailable";
+                LOG_WARN("[MenuPoc] " << result.str());
+                return result.str();
+            }
             
             // Scan for the widget class
             for (int i = 0; i < SDK::UObject::GObjects->Num(); ++i)
@@ -1056,6 +1093,13 @@ namespace Mod
             }
 
             LOG_INFO("[MenuPoc] Spawned BP_Confirmation_C: " << confActor->GetFullName());
+
+            if (!confActor->IsA(SDK::ABP_Confirmation_C::StaticClass()))
+            {
+                result << "POC8 FAILED: Spawned actor is not BP_Confirmation_C";
+                LOG_WARN("[MenuPoc] " << result.str());
+                return result.str();
+            }
             
             SDK::ABP_Confirmation_C* confirmation = static_cast<SDK::ABP_Confirmation_C*>(confActor);
             
@@ -1202,6 +1246,13 @@ namespace Mod
                 return result.str();
             }
             LOG_INFO("[MenuPoc] Created widget: " << widget->GetFullName());
+
+            if (!widget->IsA(SDK::UWBP_Confirmation_C::StaticClass()))
+            {
+                result << "POC9 FAILED: Created widget is not UWBP_Confirmation_C";
+                LOG_WARN("[MenuPoc] " << result.str());
+                return result.str();
+            }
 
             // Cast to UWBP_Confirmation_C
             SDK::UWBP_Confirmation_C* confirmWidget = static_cast<SDK::UWBP_Confirmation_C*>(widget);

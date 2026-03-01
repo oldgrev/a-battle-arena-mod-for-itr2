@@ -28,6 +28,11 @@
 //   guard so only one ModMain thread runs per process, and log PID/TID + module path.
 // - Crash/duplicate-events symptom: If you see duplicated level-change logs milliseconds apart (e.g. L_Startup -> L_MainMenu twice), assume the mod is double-loaded.
 //   Fix: enforce the PID-scoped named mutex guard in ModMain::Run so the second instance exits immediately.
+// - AutoMag deferred retries: REMOVED. The retry queue never made progress because Max=26 is a hard UE array wall
+//   that persists across all retries. Replaced with a direct call to AddItemToStackByTag via ProcessEvent inside
+//   AutoMag_FillMagazine itself — this uses UE's own TArray growth path (26→60) and is executed synchronously.
+// - Menu widget height clipping: UpdateWidgetDrawSize() now sets SetPivot(0.5, 0.95) so the widget
+//   anchors near the bottom and extends upward, and K2_SetRelativeLocation adds a per-item Z lift.
 //
 
 
@@ -156,7 +161,7 @@ namespace Mod
             {
                 SDK::UEngine* engine = SDK::UEngine::GetEngine();
                 SDK::UWorld* world = SDK::UWorld::GetWorld();
-                if (engine && world && SDK::UObject::GObjects->Num() > 1000) // Arbitrary "ready" threshold
+                if (engine && world && SDK::UObject::GObjects && SDK::UObject::GObjects->Num() > 1000) // Arbitrary "ready" threshold
                 {
                     LOG_INFO("[mod] GObjects looks ready (" << SDK::UObject::GObjects->Num() << " objects), retrying hook installation...");
                     HookManager::Get().InstallProcessEventHook();

@@ -128,12 +128,15 @@ namespace Mod::Loadout
         
         try
         {
-            subsystem = static_cast<SDK::URadiusContainerSubsystem*>(
-                SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(
-                    world, 
-                    SDK::URadiusContainerSubsystem::StaticClass()
-                )
+            SDK::UObject* subsystemObj = SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(
+                world,
+                SDK::URadiusContainerSubsystem::StaticClass()
             );
+
+            if (subsystemObj && subsystemObj->IsA(SDK::URadiusContainerSubsystem::StaticClass()))
+            {
+                subsystem = static_cast<SDK::URadiusContainerSubsystem*>(subsystemObj);
+            }
             
             LOG_INFO("[Loadout] GetWorldSubsystem returned: " << (void*)subsystem);
         }
@@ -150,6 +153,12 @@ namespace Mod::Loadout
         if (!subsystem)
         {
             LOG_WARN("[Loadout] GetWorldSubsystem failed, falling back to GObjects scan");
+
+            if (!SDK::UObject::GObjects)
+            {
+                LOG_ERROR("[Loadout] GObjects is null; cannot scan for RadiusContainerSubsystem");
+                return nullptr;
+            }
             
             int scannedCount = 0;
             int containerSubsystemCount = 0;
@@ -164,7 +173,7 @@ namespace Mod::Loadout
                 if (!cls) continue;
                 
                 std::string className = cls->GetName();
-                if (className == "RadiusContainerSubsystem")
+                if (className == "RadiusContainerSubsystem" && obj->IsA(SDK::URadiusContainerSubsystem::StaticClass()))
                 {
                     containerSubsystemCount++;
                     
@@ -1897,6 +1906,12 @@ namespace Mod::Loadout
         if (!playerPawn)
         {
             LOG_ERROR("[Loadout] GetPlayerBodySlotContainer: No player pawn");
+            return nullptr;
+        }
+
+        if (!playerPawn->IsA(SDK::ABP_RadiusPlayerCharacter_Gameplay_C::StaticClass()))
+        {
+            LOG_ERROR("[Loadout] GetPlayerBodySlotContainer: Player pawn is not ABP_RadiusPlayerCharacter_Gameplay_C");
             return nullptr;
         }
 

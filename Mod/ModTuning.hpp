@@ -50,7 +50,7 @@ namespace Mod::Tuning
     // Anti-stuck
     inline constexpr float kArenaStuckImmobileSeconds = 10.0f;
     inline constexpr float kArenaStuckTeleportCooldownSeconds = 3.0f;
-    inline constexpr float kArenaOverdueWaveSeconds = 120.0f;
+    inline constexpr float kArenaOverdueWaveSeconds = 300.0f;
     inline constexpr float kArenaTeleportMinDistanceFromPlayer = 1000.0f;
     inline constexpr float kArenaTeleportDistanceFactor = 0.2f;
     inline constexpr float kArenaStuckMoveDistanceSq = 100.0f; // (10 units)^2

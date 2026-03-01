@@ -59,14 +59,14 @@ namespace Mod
                     return nullptr;
                 }
 
-if (world->OwningGameInstance && GetTArrayNum(world->OwningGameInstance->LocalPlayers) > 0)
-            {
-                SDK::ULocalPlayer** players = GetTArrayData(world->OwningGameInstance->LocalPlayers);
-                if (players && players[0])
+                if (world->OwningGameInstance && GetTArrayNum(world->OwningGameInstance->LocalPlayers) > 0)
                 {
-                    return players[0]->PlayerController;
+                    SDK::ULocalPlayer** players = GetTArrayData(world->OwningGameInstance->LocalPlayers);
+                    if (players && players[0] && players[0]->PlayerController)
+                    {
+                        return players[0]->PlayerController;
+                    }
                 }
-            }
 
                 return SDK::UGameplayStatics::GetPlayerController(world, 0);
             }
@@ -244,13 +244,15 @@ if (world->OwningGameInstance && GetTArrayNum(world->OwningGameInstance->LocalPl
             LOG_INFO("[AI] Controller cast successful");
             LOG_INFO("[AI] Controller: " + radiusController->GetFullName());
             // Get coordination subsystem
-            auto *coord = static_cast<SDK::URadiusAICoordinationSubsystem*>(SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass()));
-            LOG_INFO("[AI] Retrieved coordination subsystem");
-            if (!coord)
+            SDK::UObject* coordObj = SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass());
+            if (!coordObj || !coordObj->IsA(SDK::URadiusAICoordinationSubsystem::StaticClass()))
             {
                 LOG_ERROR("[AI] Coordination subsystem not found");
                 return false;
             }
+
+            auto *coord = static_cast<SDK::URadiusAICoordinationSubsystem*>(coordObj);
+            LOG_INFO("[AI] Retrieved coordination subsystem");
 
             LOG_INFO("[AI] Registering NPC in coordination subsystem");
             coord->RegisterNpc(radiusController);
@@ -278,7 +280,13 @@ if (world->OwningGameInstance && GetTArrayNum(world->OwningGameInstance->LocalPl
             }
 
             auto *radiusController = static_cast<SDK::ARadiusAIControllerBase *>(controller);
-            auto *coord = static_cast<SDK::URadiusAICoordinationSubsystem*>(SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass()));
+            SDK::UObject* coordObj = SDK::USubsystemBlueprintLibrary::GetWorldSubsystem(world, SDK::URadiusAICoordinationSubsystem::StaticClass());
+            if (!coordObj || !coordObj->IsA(SDK::URadiusAICoordinationSubsystem::StaticClass()))
+            {
+                return false;
+            }
+
+            auto *coord = static_cast<SDK::URadiusAICoordinationSubsystem*>(coordObj);
 
             if (coord)
             {

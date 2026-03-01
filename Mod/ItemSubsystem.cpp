@@ -28,7 +28,11 @@ namespace Mod
 
                 if (world->OwningGameInstance && world->OwningGameInstance->LocalPlayers.Num() > 0)
                 {
-                    return world->OwningGameInstance->LocalPlayers[0]->PlayerController;
+                    SDK::ULocalPlayer* localPlayer = world->OwningGameInstance->LocalPlayers[0];
+                    if (localPlayer)
+                    {
+                        return localPlayer->PlayerController;
+                    }
                 }
 
                 return SDK::UGameplayStatics::GetPlayerController(world, 0);

@@ -44,9 +44,24 @@
 // - AutoMag capacity: GetAmmoContainerStaticData UFunction not found on some DataComponent classes. The interface function "RadiusDataComponentInterface"
 //   may not be implemented by all DataComponent subclasses.
 //   Fix: add a known-capacity lookup table keyed by magazine tag substrings (PM.Short→8, AK-74→30, etc.) and a tag-suffix parser as fallbacks.
-// - AutoMag fill cap bug: StackedItems.Num/Max can be lower than true magazine capacity (e.g. Num=0 Max=24 for a 30-round mag).
-//   If we only fill up to MaxElements without growing the array, refill silently under-fills. Fix: grow StackedItems with CRT realloc()
-//   to at least target capacity before writing items, then set NumElements to the true fill target.
+// - AutoMag fill cap bug: StackedItems.Num/Max can be lower than true magazine capacity (e.g. Num=0 Max=26 for a 30-round mag).
+//   Root cause: UE's TArray uses FMemory/GMalloc. CRT realloc() on a UE pointer = heap corruption.
+//   The stack component that owns the StackedItems TArray is BPC_ItemStackComponent_C (Blueprint),
+//   which is a subclass of URadiusItemStackComponent (UBoxComponent).
+//   GetComponentByClass(URadiusItemStackComponent::StaticClass()) should find it via IsA(); if it fails,
+//   a GObjects scan over components with Outer==magazineActor is used as fallback.
+//   Fill strategy (in order): FillStackWithItems(tag, count) → AddItemToStackByTag loop → direct TArray write.
+//   FillStackWithItems is an interface function on RadiusItemStackComponentInterface with params
+//   { FGameplayTag ItemTag @0x0000, int32 Count @0x0008, bool ReturnValue @0x000C }, total 0x0010.
+//   It handles TArray growth via UE's own TArray::Add, exactly matching what happens when the player
+//   manually loads a round. Direct TArray writes are ONLY done as last resort when UE calls fail.
+// - Menu navigation jitter: FInputActionValue is 0x20 bytes because FVector uses double precision in UE5
+//   (3 × double = 24 bytes + EInputActionValueType 8 bytes = 32 bytes). Reading parms as float* gives
+//   garbage: float[0..1] are the lower/upper 32-bit bit-patterns of the X double, not axis values.
+//   All prior float-based approaches (dominant-axis gate, float[0] fallback) were completely wrong.
+//   Fix: cast parms to double*, use doubles[0] = X (left/right strafe, ignored) and
+//   doubles[1] = Y (forward/backward locomotion axis, used for UP/DOWN menu navigation).
+//   With correct double reading, OnNavigate's 0.5 deadzone naturally suppresses left/right stick input.
 // - HUD Trace: when adding large blocks of code in anonymous namespaces that use utility functions like ToLowerCopy(), ensure forward
 //   declarations are added before the usage. The anonymous namespace has strict ordering - functions must be declared before use.
 //
@@ -69,6 +84,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
@@ -147,7 +163,7 @@ namespace Mod
         // Separate from trace_on to allow focused investigation.
         // ALWAYS ON BY DEFAULT - starts tracing from DLL load.
         // ---------------------------------------------------------------------
-        static std::atomic<bool> gHudTraceEnabled{true};  // ALWAYS ON
+        static std::atomic<bool> gHudTraceEnabled{false};
         static std::atomic<uint64_t> gHudTraceSeq{0};
 
         // Last tablet interaction summary for TCP retrieval.
@@ -1363,6 +1379,11 @@ namespace Mod
                 return false;
             }
 
+            if (!object->IsA(SDK::URadiusFirearmComponent::StaticClass()))
+            {
+                return false;
+            }
+
             auto *component = static_cast<SDK::URadiusFirearmComponent *>(object);
             auto *params = reinterpret_cast<ServerShootProjectileParams *>(parms);
             // only apply cheat if unlimited ammo is enabled, otherwise follow normal flow
@@ -2002,6 +2023,7 @@ namespace Mod
         static SDK::URadiusItemDynamicData* GetDynamicDataFromActor(SDK::AActor* actor)
         {
             if (!actor) return nullptr;
+            if (!SDK::UObject::GObjects) return nullptr;
 
             // Check it's actually a RadiusItemBase (or derived).
             if (!actor->IsA(SDK::ARadiusItemBase::StaticClass()))
@@ -2021,6 +2043,7 @@ namespace Mod
 
             SDK::UObject* resolved = SDK::UObject::GObjects->GetByIndex(raw->ObjectIndex);
             if (!resolved) return nullptr;
+            if (!resolved->IsA(SDK::URadiusItemDynamicData::StaticClass())) return nullptr;
 
             return static_cast<SDK::URadiusItemDynamicData*>(resolved);
         }
@@ -2057,105 +2080,321 @@ namespace Mod
             return 0; // Unknown
         }
 
-        // Helper: fill a magazine's StackedItems directly, then trigger visual update
+        // AILEARNING: FillStackWithItems(ItemTag, Count) on RadiusItemStackComponentInterface is the correct
+        // UE-native way to fill a magazine. The stack component on mag actors is BPC_ItemStackComponent_C
+        // (a Blueprint subclass of URadiusItemStackComponent). We try multiple strategies to find it and
+        // call the fill in order, with direct TArray writes as last resort only.
+        //
+        // Component search strategy:
+        //   A) GetComponentByClass(URadiusItemStackComponent::StaticClass()) — should find BP subclass via IsA()
+        //   B) GObjects linear scan for outer==magazineActor with FillStackWithItems function
+        //   C) Call function directly on the actor (actor may forward interface calls to its component)
+        //
+        // Fill strategy (in order of preference):
+        //   1) FillStackWithItems(ammoTag, neededCount) — UE-native, handles TArray growth
+        //   2) AddItemToStackByTag in a loop — for remainder if #1 partially filled
+        //   3) Direct TArray write — only if Data==null or MaxElements already sufficient
+        //
         static bool AutoMag_FillMagazine(SDK::AActor* magazineActor, int32_t capacity, SDK::FGameplayTag ammoTag)
         {
-            if (!magazineActor || capacity <= 0) 
+            if (!magazineActor || capacity <= 0)
             {
                 LOG_ERROR("[AutoMag][Fill] Invalid params: actor=" << (void*)magazineActor << " capacity=" << capacity);
                 return false;
             }
 
-            SDK::URadiusItemDynamicData* dynData = GetDynamicDataFromActor(magazineActor);
-            if (!dynData)
+            // Helper: read TArray state from DynamicData offset 0x0150
+            struct TArrayLayout { SDK::FStackedItem* Data; int32_t NumElements; int32_t MaxElements; };
+            auto GetStackArr = [&]() -> TArrayLayout*
             {
-                LOG_ERROR("[AutoMag][Fill] No DynamicData on magazine");
-                return false;
-            }
-
-            // StackedItems at offset 0x0150
-            struct TArrayLayout
-            {
-                SDK::FStackedItem* Data;
-                int32_t NumElements;
-                int32_t MaxElements;
+                SDK::URadiusItemDynamicData* d = GetDynamicDataFromActor(magazineActor);
+                if (!d) return nullptr;
+                return reinterpret_cast<TArrayLayout*>(reinterpret_cast<uint8_t*>(d) + 0x0150);
             };
 
-            uint8_t* dynBase = reinterpret_cast<uint8_t*>(dynData);
-            TArrayLayout* stackedArr = reinterpret_cast<TArrayLayout*>(dynBase + 0x0150);
+            // Helper: find a UFunction by name alone, walking the full SuperStruct chain.
+            // GetFunction(className, fnName) requires className to match a node in the SuperStruct
+            // chain. Interface classes (e.g. RadiusItemStackComponentInterface) are NOT in that
+            // chain, so GetFunction always returned null. This helper skips the class-name filter.
+            auto FindFnByName = [](SDK::UObject* obj, const char* fnName) -> SDK::UFunction*
+            {
+                if (!obj || !obj->Class) return nullptr;
+                for (const SDK::UStruct* clss = obj->Class; clss; clss = clss->SuperStruct)
+                {
+                    for (SDK::UField* field = clss->Children; field; field = field->Next)
+                    {
+                        if (field->HasTypeFlag(SDK::EClassCastFlags::Function) && field->GetName() == fnName)
+                            return static_cast<SDK::UFunction*>(field);
+                    }
+                }
+                return nullptr;
+            };
 
-            const int32_t currentCount = stackedArr->NumElements;
-            const int32_t maxElements = stackedArr->MaxElements;
-            
-            LOG_INFO("[AutoMag][Fill] Current=" << currentCount 
-                     << " Max=" << maxElements
+            // Helper: call FillStackWithItems or AddItemToStackByTag on a UObject target
+            auto TryFillViaSDK = [&](SDK::UObject* target, const char* targetDesc, int32_t neededCount) -> int32_t
+            {
+                // Returns number of additional items added (best-effort estimate from TArray delta)
+                if (!target || neededCount <= 0) return 0;
+
+                TArrayLayout* arr = GetStackArr();
+                int32_t before = arr ? arr->NumElements : 0;
+
+                // --- Attempt A: FillStackWithItems ---
+                SDK::UFunction* fillFn = nullptr;
+                try { fillFn = FindFnByName(target, "FillStackWithItems"); }
+                catch (...) { fillFn = nullptr; }
+
+                if (fillFn)
+                {
+                    struct FillParams { SDK::FGameplayTag ItemTag; int32_t Count; bool ReturnValue; uint8_t Pad[3]; };
+                    FillParams fp{};
+                    fp.ItemTag = ammoTag;
+                    fp.Count = neededCount;
+                    try
+                    {
+                        ScopedProcessEventGuard g;
+                        target->ProcessEvent(fillFn, &fp);
+                    }
+                    catch (...) { LOG_WARN("[AutoMag][Fill] FillStackWithItems threw on " << targetDesc); }
+
+                    arr = GetStackArr();
+                    int32_t after = arr ? arr->NumElements : before;
+                    LOG_INFO("[AutoMag][Fill] FillStackWithItems on " << targetDesc
+                             << ": Count=" << neededCount << " success=" << fp.ReturnValue
+                             << " Num: " << before << "->" << after
+                             << " Max=" << (arr ? arr->MaxElements : -1));
+                    int32_t added = after - before;
+                    if (added > 0) return added;
+                }
+                else
+                {
+                    LOG_WARN("[AutoMag][Fill] FillStackWithItems fn not found on " << targetDesc
+                             << " (class=" << (target->Class ? target->Class->GetName() : "?") << ")");
+                }
+
+                // --- Attempt B: AddItemToStackByTag in a loop ---
+                SDK::UFunction* addFn = nullptr;
+                try { addFn = FindFnByName(target, "AddItemToStackByTag"); }
+                catch (...) { addFn = nullptr; }
+
+                if (addFn)
+                {
+                    struct AddParams { SDK::FGameplayTag ItemType; bool ReturnValue; uint8_t Pad[3]; };
+                    int32_t loopAdded = 0;
+                    for (int32_t i = 0; i < neededCount; ++i)
+                    {
+                        AddParams ap{}; ap.ItemType = ammoTag; ap.ReturnValue = false;
+                        try { ScopedProcessEventGuard g; target->ProcessEvent(addFn, &ap); }
+                        catch (...) { LOG_WARN("[AutoMag][Fill] AddItemToStackByTag threw on " << targetDesc); break; }
+                        if (!ap.ReturnValue) { LOG_WARN("[AutoMag][Fill] AddItemToStackByTag returned false after " << loopAdded << " adds"); break; }
+                        ++loopAdded;
+                    }
+                    arr = GetStackArr();
+                    int32_t after = arr ? arr->NumElements : before;
+                    LOG_INFO("[AutoMag][Fill] AddItemToStackByTag loop on " << targetDesc
+                             << ": loopAdded=" << loopAdded
+                             << " Num: " << before << "->" << after
+                             << " Max=" << (arr ? arr->MaxElements : -1));
+                    return after - before;
+                }
+                else
+                {
+                    LOG_WARN("[AutoMag][Fill] AddItemToStackByTag fn not found on " << targetDesc);
+                }
+
+                return 0;
+            };
+
+            // ====================================================================
+            // Step 1: Locate the stack component via multiple strategies
+            // ====================================================================
+            SDK::UObject* stackTarget = nullptr;
+
+            // Strategy 1A: GetComponentByClass (should find Blueprint subclass via IsA)
+            try
+            {
+                ScopedProcessEventGuard g;
+                auto* comp = magazineActor->GetComponentByClass(SDK::URadiusItemStackComponent::StaticClass());
+                if (comp) { stackTarget = comp; LOG_INFO("[AutoMag][Fill] Found comp via GetComponentByClass: " << comp->GetName()); }
+            }
+            catch (...) {}
+
+            // Strategy 1B: GObjects scan for component belonging to this actor with the interface
+            if (!stackTarget)
+            {
+                LOG_WARN("[AutoMag][Fill] GetComponentByClass returned null, scanning GObjects for magazine's stack component");
+                int32_t total = SDK::UObject::GObjects->Num();
+                int32_t scanned = 0;
+                for (int32_t i = 0; i < total && !stackTarget; ++i)
+                {
+                    try
+                    {
+                        SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(i);
+                        if (!obj || !obj->Class) continue;
+                        if (obj->Outer != magazineActor) continue;
+                        ++scanned;
+                        SDK::UFunction* fn = nullptr;
+                        try { fn = FindFnByName(obj, "FillStackWithItems"); }
+                        catch (...) {}
+                        if (fn) { stackTarget = obj; LOG_INFO("[AutoMag][Fill] Found comp via GObjects scan: " << obj->GetName()); }
+                    }
+                    catch (...) {}
+                }
+                if (!stackTarget)
+                    LOG_WARN("[AutoMag][Fill] GObjects scan: no stack comp found (scanned " << scanned << " components of actor)");
+            }
+
+            // ====================================================================
+            // Step 2: Read initial TArray state
+            // ====================================================================
+            TArrayLayout* stackedArr = GetStackArr();
+            if (!stackedArr)
+            {
+                LOG_ERROR("[AutoMag][Fill] Could not get DynamicData TArray from actor");
+                return false;
+            }
+
+            int32_t startNum = stackedArr->NumElements;
+            int32_t startMax = stackedArr->MaxElements;
+            LOG_INFO("[AutoMag][Fill] Initial state: Num=" << startNum << " Max=" << startMax << " Target=" << capacity
+                     << " actor=" << magazineActor->GetName());
+
+            if (startNum >= capacity)
+            {
+                LOG_INFO("[AutoMag][Fill] Already at/above capacity");
+                return false;
+            }
+
+            int32_t needed = capacity - startNum;
+
+            // ====================================================================
+            // Step 3: Try SDK calls on stack component (FillStackWithItems + AddByTag loop)
+            // ====================================================================
+            bool sdkFillSucceeded = false;
+            if (stackTarget)
+            {
+                int32_t added = TryFillViaSDK(stackTarget, "stackComp", needed);
+                stackedArr = GetStackArr();
+                if (stackedArr && stackedArr->NumElements >= capacity)
+                {
+                    LOG_INFO("[AutoMag][Fill] SDK fill via stackComp succeeded fully. Num=" << stackedArr->NumElements);
+                    sdkFillSucceeded = true;
+                }
+                else if (added > 0 && stackedArr)
+                {
+                    LOG_WARN("[AutoMag][Fill] SDK fill partial on stackComp: Num=" << stackedArr->NumElements << " need=" << capacity);
+                }
+            }
+
+            // Strategy 3B: try actor directly (actor may implement interface or delegate to component)
+            if (!sdkFillSucceeded)
+            {
+                stackedArr = GetStackArr();
+                int32_t stillNeeded = stackedArr ? (capacity - stackedArr->NumElements) : needed;
+                if (stillNeeded > 0)
+                {
+                    int32_t added = TryFillViaSDK(magazineActor, "actor", stillNeeded);
+                    stackedArr = GetStackArr();
+                    if (stackedArr && stackedArr->NumElements >= capacity)
+                    {
+                        LOG_INFO("[AutoMag][Fill] SDK fill via actor succeeded fully. Num=" << stackedArr->NumElements);
+                        sdkFillSucceeded = true;
+                    }
+                    else if (added > 0)
+                    {
+                        LOG_WARN("[AutoMag][Fill] SDK fill partial on actor: Num=" << (stackedArr ? stackedArr->NumElements : -1));
+                    }
+                }
+            }
+
+            // ====================================================================
+            // Step 4: Direct TArray write fallback for any remaining deficit
+            // ====================================================================
+            stackedArr = GetStackArr();
+            if (stackedArr && stackedArr->NumElements < capacity)
+            {
+                int32_t curNum = stackedArr->NumElements;
+                int32_t curMax = stackedArr->MaxElements;
+                LOG_WARN("[AutoMag][Fill] Fallback direct write: Num=" << curNum << " Max=" << curMax << " Target=" << capacity);
+
+                // Ensure buffer capacity
+                if (curMax < capacity)
+                {
+                    if (stackedArr->Data == nullptr)
+                    {
+                        // Unallocated: safe to malloc fresh buffer
+                        size_t bytes = static_cast<size_t>(capacity) * sizeof(SDK::FStackedItem);
+                        void* mem = std::malloc(bytes);
+                        if (!mem) { LOG_ERROR("[AutoMag][Fill] malloc failed for " << capacity << " slots"); }
+                        else
+                        {
+                            std::memset(mem, 0, bytes);
+                            stackedArr->Data = static_cast<SDK::FStackedItem*>(mem);
+                            stackedArr->MaxElements = capacity;
+                            curMax = capacity;
+                            LOG_INFO("[AutoMag][Fill] Fresh malloc: " << capacity << " slots");
+                        }
+                    }
+                    else
+                    {
+                        // UE-owned buffer is smaller than target — clamp write to MaxElements
+                        // (CRT realloc on a UE pointer is unsafe; SDK calls above already tried to grow)
+                        LOG_WARN("[AutoMag][Fill] UE buffer too small (Max=" << curMax << " want=" << capacity
+                                 << ") — direct write clamped to Max=" << curMax);
+                        capacity = curMax;
+                    }
+                }
+
+                // Direct write remaining slots
+                if (stackedArr->Data && capacity > curNum)
+                {
+                    for (int32_t i = curNum; i < capacity; ++i)
+                    {
+                        stackedArr->Data[i].ItemTag = ammoTag;
+                        stackedArr->Data[i].bIsShell = false;
+                    }
+                    stackedArr->NumElements = capacity;
+                    LOG_INFO("[AutoMag][Fill] Direct write: set Num=" << capacity << " from " << curNum);
+                }
+            }
+
+            // ====================================================================
+            // Step 5: Final state log + FireOnStackChanged
+            // ====================================================================
+            stackedArr = GetStackArr();
+            LOG_INFO("[AutoMag][Fill] Final: Num=" << (stackedArr ? stackedArr->NumElements : -1)
+                     << " Max=" << (stackedArr ? stackedArr->MaxElements : -1)
                      << " Target=" << capacity);
-            
-            if (currentCount >= capacity)
+
+            // Fire visual update on stack component (or actor as fallback)
+            SDK::UObject* fireTarget = stackTarget ? stackTarget : static_cast<SDK::UObject*>(magazineActor);
+            SDK::UFunction* fireFn = nullptr;
+            try { fireFn = fireTarget->Class->GetFunction("RadiusItemStackComponent", "FireOnStackChanged"); }
+            catch (...) {}
+            if (!fireFn && stackTarget)
             {
-                LOG_INFO("[AutoMag][Fill] Already at capacity");
-                return false;
+                try { fireFn = magazineActor->Class->GetFunction("RadiusItemStackComponent", "FireOnStackChanged"); }
+                catch (...) {}
             }
-
-            // Ensure buffer can actually hold target capacity.
-            if (maxElements < capacity)
+            if (fireFn)
             {
-                const size_t requiredBytes = static_cast<size_t>(capacity) * sizeof(SDK::FStackedItem);
-                void* grown = std::realloc(stackedArr->Data, requiredBytes);
-                if (!grown)
-                {
-                    LOG_ERROR("[AutoMag][Fill] realloc failed: oldMax=" << maxElements << " target=" << capacity);
-                    return false;
-                }
-
-                stackedArr->Data = static_cast<SDK::FStackedItem*>(grown);
-                stackedArr->MaxElements = capacity;
-                LOG_INFO("[AutoMag][Fill] Grew stack buffer from " << maxElements << " to " << capacity);
-            }
-
-            int32_t fillTo = capacity;
-            
-            if (!stackedArr->Data && fillTo > 0)
-            {
-                LOG_ERROR("[AutoMag][Fill] Data pointer is NULL but need to fill");
-                return false;
-            }
-
-            // Fill from current to fillTo
-            for (int32_t i = currentCount; i < fillTo; ++i)
-            {
-                stackedArr->Data[i].ItemTag = ammoTag;
-                stackedArr->Data[i].bIsShell = false;
-            }
-            stackedArr->NumElements = fillTo;
-
-            LOG_INFO("[AutoMag][Fill] Filled from " << currentCount << " to " << fillTo);
-
-            // Get stack component and trigger visual update
-            SDK::URadiusItemStackComponent* stackComp = nullptr;
-            {
-                ScopedProcessEventGuard guard;
-                stackComp = static_cast<SDK::URadiusItemStackComponent*>(
-                    magazineActor->GetComponentByClass(SDK::URadiusItemStackComponent::StaticClass()));
-            }
-
-            if (stackComp)
-            {
-                // FireOnStackChanged triggers the visual update
-                try
-                {
-                    ScopedProcessEventGuard guard;
-                    stackComp->FireOnStackChanged();
-                    LOG_INFO("[AutoMag][Fill] Triggered visual update via FireOnStackChanged");
-                }
-                catch (...)
-                {
-                    LOG_WARN("[AutoMag][Fill] Exception calling FireOnStackChanged");
-                }
+                try { ScopedProcessEventGuard g; fireTarget->ProcessEvent(fireFn, nullptr); LOG_INFO("[AutoMag][Fill] FireOnStackChanged fired"); }
+                catch (...) { LOG_WARN("[AutoMag][Fill] FireOnStackChanged threw"); }
             }
             else
             {
-                LOG_WARN("[AutoMag][Fill] No stack component found, visual update may not occur");
+                // Fallback: cast and call directly
+                if (stackTarget)
+                {
+                    try
+                    {
+                        ScopedProcessEventGuard g;
+                        auto* sc = static_cast<SDK::URadiusItemStackComponent*>(stackTarget);
+                        sc->FireOnStackChanged();
+                        LOG_INFO("[AutoMag][Fill] FireOnStackChanged called directly");
+                    }
+                    catch (...) { LOG_WARN("[AutoMag][Fill] FireOnStackChanged direct call threw"); }
+                }
             }
 
             return true;
@@ -2626,6 +2865,19 @@ namespace Mod
         // Navigation: Left thumbstick (IA_Movement)
         // _0 = Started, _1 = Triggered (continuous). We want both for stick tracking.
         // When menu is open, we read Y axis for up/down and suppress game movement.
+        //
+        // AILEARNING: Dominant-axis gate added to prevent left/right stick from triggering
+        // AILEARNING: FInputActionValue layout (SDK confirmed, 0x0020 total):
+        //   Offset 0x00 (8 bytes): double Value.X  — thumbstick left/right strafe
+        //   Offset 0x08 (8 bytes): double Value.Y  — thumbstick forward/backward (locomotion)
+        //   Offset 0x10 (8 bytes): double Value.Z  — always 0.0 for 2D axis input
+        //   Offset 0x18 (8 bytes): EInputActionValueType + padding (2 = Axis2D)
+        // FVector uses double precision in UE5. Reading parms as float* gives garbage:
+        //   float[0..1] = lower/upper 32-bit fragments of the X double
+        //   float[2..3] = lower/upper 32-bit fragments of the Y double
+        // Fix: cast to double*, use doubles[0] (X) and doubles[1] (Y) directly.
+        // For vertical menu navigation, use doubles[1] (Y = forward/backward push).
+        // Left/right push gives doubles[1] ≈ 0 which the 0.5 deadzone in OnNavigate catches.
         bool Hook_VRMenu_Movement(SDK::UObject* object, SDK::UFunction* function, void* parms, HookManager::ProcessEventFn originalFn)
         {
             (void)originalFn;
@@ -2636,15 +2888,27 @@ namespace Mod
             if (!menu || !menu->IsMenuOpen())
                 return false;  // Menu closed — let game handle movement normally
 
-            // Log raw bytes for the first few intercepts to diagnose layout
+            // Log raw bytes for one-time layout verification
             LogInputActionValueBytes("Movement", parms);
 
-            const float* axisValues = reinterpret_cast<const float*>(parms);
-            //float thumbstickY = axisValues[1];  // Y axis = forward/back = up/down in menu
-            // UE5 OpenXR input mapping seems to have changed, and left stick Y is now axis 0
-            float thumbstickY = axisValues[0];
+            // FInputActionValue: double X (strafe), double Y (forward/back), double Z (0), ValueType
+            const double* axisDoubles = reinterpret_cast<const double*>(parms);
+            const double axisX = axisDoubles[0];  // left/right (strafe) — ignore for vertical nav
+            const double axisY = axisDoubles[1];  // forward/backward — use as vertical nav axis
 
-            menu->OnNavigate(thumbstickY);
+            // Throttled logging so every event is traceable without flooding
+            {
+                static auto lastNavLog = std::chrono::steady_clock::time_point{};
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavLog).count() > 100)
+                {
+                    lastNavLog = now;
+                    LOG_INFO("[VRMenu:Nav] X(strafe)=" << axisX << " Y(fwd)=" << axisY
+                             << " -> thumbstickY=" << axisY);
+                }
+            }
+
+            menu->OnNavigate(static_cast<float>(axisY));
 
             return true;  // SUPPRESS game movement while menu is open
         }
@@ -2990,6 +3254,12 @@ namespace Mod
 
         LOG_INFO("[HookManager] Installing ProcessEvent hook...");
 
+        if (!SDK::UObject::GObjects)
+        {
+            LOG_ERROR("[HookManager] GObjects is null");
+            return false;
+        }
+
         // Safety: check GObjects is actually there and has enough items to be useful
         if (SDK::UObject::GObjects->Num() < 100) 
         {
@@ -3209,7 +3479,7 @@ namespace Mod
         {
             TraceOnProcessEvent(pThis, function);
             // HUD trace: dedicated HUD-specific tracing with parameter capture
-            HudTraceOnProcessEvent(pThis, function, parms);
+            //HudTraceOnProcessEvent(pThis, function, parms);
             // AutoMag diagnostic monitor: log ALL magazine/container/holster related ProcessEvents
             //AutoMag_DiagnosticMonitor(pThis, function);
         }
@@ -3258,30 +3528,30 @@ namespace Mod
             return;
         }
 
-        // Tablet UI interaction discovery: we cannot rely on knowing every exact delegate name up-front.
-        // When enabled, log any *tablet-scoped* delegate signature events as a catch-all.
-        if (gTabletInteractionDiagEnabled.load(std::memory_order_relaxed) && pThis)
-        {
-            const std::string fnName = function->GetName();
-            if (fnName.find("DelegateSignature") != std::string::npos)
-            {
-                const std::string objFull = pThis->GetFullName();
-                if (objFull.find("Tablet") != std::string::npos)
-                {
-                    static uint64_t lastMs = 0;
-                    const uint64_t nowMs = TraceFileWriter::NowTickMs();
-                    if (lastMs == 0 || nowMs - lastMs >= 150)
-                    {
-                        lastMs = nowMs;
-                        const std::string fnFull = function->GetFullName();
-                        const std::string outer = (pThis->Outer ? pThis->Outer->GetFullName() : std::string("<null>"));
-                        const std::string s = std::string("[TabletDiag] UiDelegate obj=") + objFull + " outer=" + outer + " fn=" + fnFull;
-                        LOG_INFO(s);
-                        TabletInteraction_Record(s);
-                    }
-                }
-            }
-        }
+        // // Tablet UI interaction discovery: we cannot rely on knowing every exact delegate name up-front.
+        // // When enabled, log any *tablet-scoped* delegate signature events as a catch-all.
+        // if (gTabletInteractionDiagEnabled.load(std::memory_order_relaxed) && pThis)
+        // {
+        //     const std::string fnName = function->GetName();
+        //     if (fnName.find("DelegateSignature") != std::string::npos)
+        //     {
+        //         const std::string objFull = pThis->GetFullName();
+        //         if (objFull.find("Tablet") != std::string::npos)
+        //         {
+        //             static uint64_t lastMs = 0;
+        //             const uint64_t nowMs = TraceFileWriter::NowTickMs();
+        //             if (lastMs == 0 || nowMs - lastMs >= 150)
+        //             {
+        //                 lastMs = nowMs;
+        //                 const std::string fnFull = function->GetFullName();
+        //                 const std::string outer = (pThis->Outer ? pThis->Outer->GetFullName() : std::string("<null>"));
+        //                 const std::string s = std::string("[TabletDiag] UiDelegate obj=") + objFull + " outer=" + outer + " fn=" + fnFull;
+        //                 LOG_INFO(s);
+        //                 TabletInteraction_Record(s);
+        //             }
+        //         }
+        //     }
+        // }
 
         // Check cache first (Lock-protected or shared_locked)
         auto cacheIt = mgr.cachedNamedHooks_.find(function);
@@ -3303,14 +3573,27 @@ namespace Mod
         auto it = mgr.namedHooks_.find(functionName);
         NamedHookFn foundHook = (it != mgr.namedHooks_.end()) ? it->second : nullptr;
 
-        // Upgrading to unique_lock to update cache is expensive, but only happens once per function.
-        // However, we can't easily upgrade shared_lock to unique_lock in C++17 shared_mutex.
-        // Instead, we'll release and re-acquire, or just use naming.
+        // Updating the cache needs exclusive ownership.
+        // Even in C++20, std::shared_mutex/std::shared_lock still provide no standard lock-upgrade API.
+        // So we release shared ownership, then re-acquire unique ownership and re-validate before writing.
         lock.unlock();
-        
+
         {
             std::unique_lock<std::shared_mutex> uniqueLock(mgr.mutex_);
-            mgr.cachedNamedHooks_[function] = foundHook;
+
+            // Another thread may have populated this entry while we were between locks.
+            auto cachedIt = mgr.cachedNamedHooks_.find(function);
+            if (cachedIt != mgr.cachedNamedHooks_.end())
+            {
+                foundHook = cachedIt->second;
+            }
+            else
+            {
+                // Re-read under exclusive lock so cache never stores a stale mapping if hooks changed.
+                auto namedIt = mgr.namedHooks_.find(functionName);
+                foundHook = (namedIt != mgr.namedHooks_.end()) ? namedIt->second : nullptr;
+                mgr.cachedNamedHooks_[function] = foundHook;
+            }
         }
 
         if (foundHook)

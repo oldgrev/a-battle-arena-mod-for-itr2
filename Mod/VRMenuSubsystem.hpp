@@ -134,7 +134,7 @@ namespace Mod
         std::vector<MenuPage> pageStack_;  // For back navigation
 
         // Arena config state (persisted across menu closes)
-        int arenaEnemyCount_ = 3;
+        int arenaEnemyCount_ = 200;
         int arenaWaveCount_ = 5;
         
         // Friend class selection state

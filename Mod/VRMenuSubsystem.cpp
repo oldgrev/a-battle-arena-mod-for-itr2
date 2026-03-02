@@ -441,14 +441,14 @@ namespace Mod
         items_.push_back({"Enemies: +",
             [this]() -> std::string { return std::to_string(arenaEnemyCount_); },
             [this]() {
-                arenaEnemyCount_ = (std::min)(20, arenaEnemyCount_ + 1);
+                arenaEnemyCount_ = (std::min)(200, arenaEnemyCount_ + 5);
             }
         });
 
         items_.push_back({"Enemies: -",
             [this]() -> std::string { return std::to_string(arenaEnemyCount_); },
             [this]() {
-                arenaEnemyCount_ = (std::max)(1, arenaEnemyCount_ - 1);
+                arenaEnemyCount_ = (std::max)(1, arenaEnemyCount_ - 5);
             }
         });
 

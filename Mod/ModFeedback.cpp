@@ -422,14 +422,35 @@ namespace Mod::ModFeedback
             gRightWidgetExpiryMs = NowTickMs() + static_cast<uint64_t>(seconds * 1000.0f);
 
             SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
-            if (player && player->W_GripDebug_R)
+            if (player)
             {
-                if (!player->W_GripDebug_R->bVisible)
+                
+                if (!player->W_GripDebug_R)
                 {
-                    player->W_GripDebug_R->SetVisibility(true, true);
+                    // initialize the widget if we haven't already, in case ShowOnRightWidget is called before EnsureRightHandWidget for some reason
+                    LOG_WARN("[ModFeedback][RH] W_GripDebug_R is null on player when showing message; attempting to initialize widget");
+                    EnsureRightHandWidget();
+                    if (!player->W_GripDebug_R)
+                    {
+                        LOG_WARN("[ModFeedback][RH] Still cannot show message because W_GripDebug_R is null on player");
+                        return false;
+                    }
+                    if (player->W_GripDebug_R->bVisible == false)
+                    {
+                        player->W_GripDebug_R->SetVisibility(true, true);
+                    }
+
                 }
                 player->W_GripDebug_R->RequestRedraw();
+
             }
+            else
+            {
+                LOG_WARN("[ModFeedback][RH] Cannot request redraw of W_GripDebug_R because player character is not available");
+                return false;
+            }
+
+
             return true;
         }
 

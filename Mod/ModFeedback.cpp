@@ -323,6 +323,16 @@ namespace Mod::ModFeedback
 
         static SDK::UWBP_Confirmation_C* gRightWidget = nullptr;  // owned by UE GC
         static uint64_t gRightWidgetExpiryMs = 0;                 // 0 = no active message
+        static SDK::ABP_RadiusPlayerCharacter_Gameplay_C* gRightWidgetOwnerPlayer = nullptr; // track which player owns the widget
+        static int gRHLogCount = 0;
+        constexpr int kRHLogLimit = 500;  // extensive logging for debugging
+
+        // Helper: check if a UObject is still valid (not GC'd/pending kill)
+        static bool IsWidgetValid(const SDK::UObject* obj)
+        {
+            if (!obj) return false;
+            return SDK::UKismetSystemLibrary::IsValid(obj);
+        }
 
         // Lazily create and attach the WBP_Confirmation widget to W_GripDebug_R.
         // Returns true if gRightWidget is ready to use.
@@ -331,21 +341,41 @@ namespace Mod::ModFeedback
             SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
             if (!player || player->IsDefaultObject())
             {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] EnsureRightHandWidget: no valid player (player=" << (player ? "CDO" : "null") << ")");
                 gRightWidget = nullptr;
+                gRightWidgetOwnerPlayer = nullptr;
                 return false;
             }
 
             SDK::UWidgetComponent* comp = player->W_GripDebug_R;
             if (!comp)
             {
-                static bool warnedOnce = false;
-                if (!warnedOnce) { warnedOnce = true; LOG_WARN("[ModFeedback][RH] W_GripDebug_R is null on player"); }
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] EnsureRightHandWidget: W_GripDebug_R is null on player");
                 gRightWidget = nullptr;
+                gRightWidgetOwnerPlayer = nullptr;
                 return false;
             }
 
-            if (gRightWidget)
+            // Check if cached widget is still valid AND belongs to current player
+            if (gRightWidget && gRightWidgetOwnerPlayer == player && IsWidgetValid(gRightWidget))
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_INFO("[ModFeedback][RH] EnsureRightHandWidget: cached widget still valid");
                 return true;
+            }
+
+            // Widget invalid, stale, or belongs to different player - need to recreate
+            if (gRightWidget)
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_INFO("[ModFeedback][RH] EnsureRightHandWidget: cached widget invalid/stale, recreating (owner=" 
+                        << (gRightWidgetOwnerPlayer == player ? "same" : "different") 
+                        << " valid=" << (IsWidgetValid(gRightWidget) ? "yes" : "no") << ")");
+                gRightWidget = nullptr;
+                gRightWidgetOwnerPlayer = nullptr;
+            }
 
             SDK::UWorld* world = Mod::GameContext::GetWorld();
             if (!world) return false;
@@ -395,7 +425,11 @@ namespace Mod::ModFeedback
                 gRightWidget->No_Text = emptyText;
             }
 
-            LOG_INFO("[ModFeedback][RH] Right-hand message widget created and attached to W_GripDebug_R");
+            // Track ownership so we can detect player changes
+            gRightWidgetOwnerPlayer = player;
+
+            if (gRHLogCount++ < kRHLogLimit)
+                LOG_INFO("[ModFeedback][RH] Right-hand message widget created and attached to W_GripDebug_R");
             return true;
         }
 
@@ -403,8 +437,32 @@ namespace Mod::ModFeedback
         // Returns true if the widget rendered the message (false = widget not available).
         static bool ShowOnRightWidget(const wchar_t* text, float seconds)
         {
-            if (!EnsureRightHandWidget() || !gRightWidget)
+            if (gRHLogCount++ < kRHLogLimit)
+                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget called: text_len=" << (text ? wcslen(text) : 0) << " seconds=" << seconds);
+
+            if (!EnsureRightHandWidget())
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: EnsureRightHandWidget failed");
                 return false;
+            }
+            
+            if (!gRightWidget)
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: gRightWidget is null after EnsureRightHandWidget succeeded?!");
+                return false;
+            }
+
+            // Re-validate widget hasn't been GC'd between EnsureRightHandWidget and now
+            if (!IsWidgetValid(gRightWidget))
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: widget became invalid (GC'd?)");
+                gRightWidget = nullptr;
+                gRightWidgetOwnerPlayer = nullptr;
+                return false;
+            }
 
             std::wstring msg(text);
             SDK::FString msgStr = MakeStableFString(msg);
@@ -417,39 +475,43 @@ namespace Mod::ModFeedback
                 SDK::FTextBlockStyle style = gRightWidget->Txt_TextConfirm->WidgetStyle;
                 style.ColorAndOpacity.SpecifiedColor = SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f};
                 gRightWidget->Txt_TextConfirm->SetWidgetStyle(style);
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: set text on Txt_TextConfirm");
+            }
+            else
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: Txt_TextConfirm is null, text set only on Description");
             }
 
             gRightWidgetExpiryMs = NowTickMs() + static_cast<uint64_t>(seconds * 1000.0f);
 
             SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
-            if (player)
+            if (!player)
             {
-                
-                if (!player->W_GripDebug_R)
-                {
-                    // initialize the widget if we haven't already, in case ShowOnRightWidget is called before EnsureRightHandWidget for some reason
-                    LOG_WARN("[ModFeedback][RH] W_GripDebug_R is null on player when showing message; attempting to initialize widget");
-                    EnsureRightHandWidget();
-                    if (!player->W_GripDebug_R)
-                    {
-                        LOG_WARN("[ModFeedback][RH] Still cannot show message because W_GripDebug_R is null on player");
-                        return false;
-                    }
-                    if (player->W_GripDebug_R->bVisible == false)
-                    {
-                        player->W_GripDebug_R->SetVisibility(true, true);
-                    }
-
-                }
-                player->W_GripDebug_R->RequestRedraw();
-
-            }
-            else
-            {
-                LOG_WARN("[ModFeedback][RH] Cannot request redraw of W_GripDebug_R because player character is not available");
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: player became null after text set");
                 return false;
             }
 
+            SDK::UWidgetComponent* comp = player->W_GripDebug_R;
+            if (!comp)
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: W_GripDebug_R is null on player");
+                return false;
+            }
+
+            // CRITICAL FIX: Always ensure visibility is ON before showing a message
+            // TickRightWidget() hides the component when message expires, so we must re-enable it here
+            bool wasHidden = !comp->IsVisible();
+            comp->SetVisibility(true, true);
+            comp->SetHiddenInGame(false, true);
+            comp->RequestRedraw();
+
+            if (gRHLogCount++ < kRHLogLimit)
+                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: success (wasHidden=" << (wasHidden ? "yes" : "no") 
+                    << " expiryMs=" << gRightWidgetExpiryMs << ")");
 
             return true;
         }
@@ -457,10 +519,24 @@ namespace Mod::ModFeedback
         // Called every tick. Clears the right-hand widget text once the message duration expires.
         static void TickRightWidget()
         {
+            // First, check if widget is still valid
+            if (gRightWidget && !IsWidgetValid(gRightWidget))
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_INFO("[ModFeedback][RH] TickRightWidget: cached widget became invalid (GC'd), clearing");
+                gRightWidget = nullptr;
+                gRightWidgetOwnerPlayer = nullptr;
+                gRightWidgetExpiryMs = 0;
+                return;
+            }
+
             if (!gRightWidget || gRightWidgetExpiryMs == 0)
                 return;
             if (NowTickMs() < gRightWidgetExpiryMs)
                 return;
+
+            if (gRHLogCount++ < kRHLogLimit)
+                LOG_INFO("[ModFeedback][RH] TickRightWidget: message expired, clearing text and hiding widget");
 
             gRightWidgetExpiryMs = 0;
 
@@ -469,14 +545,21 @@ namespace Mod::ModFeedback
             gRightWidget->Description = emptyText;
             if (gRightWidget->Txt_TextConfirm)
                 gRightWidget->Txt_TextConfirm->SetText(emptyText);
-            
-            
 
             SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
             if (player && player->W_GripDebug_R)
             {
                 player->W_GripDebug_R->SetVisibility(false, true);
                 player->W_GripDebug_R->RequestRedraw();
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_INFO("[ModFeedback][RH] TickRightWidget: component hidden");
+            }
+            else
+            {
+                if (gRHLogCount++ < kRHLogLimit)
+                    LOG_WARN("[ModFeedback][RH] TickRightWidget: could not hide component (player=" 
+                        << (player ? "valid" : "null") << " comp=" 
+                        << (player && player->W_GripDebug_R ? "valid" : "null") << ")");
             }
         }
 
@@ -1470,5 +1553,15 @@ namespace Mod::ModFeedback
             LOG_INFO("[ModFeedback] Default sounds folder NOT found at: " << soundsFolder.string()
                 << " (create 'sounds/' next to the DLL to enable sound groups)");
         }
+    }
+
+    void ClearWidgetCache()
+    {
+        if (gRHLogCount++ < kRHLogLimit)
+            LOG_INFO("[ModFeedback][RH] ClearWidgetCache called - clearing cached widget reference");
+        
+        gRightWidget = nullptr;
+        gRightWidgetOwnerPlayer = nullptr;
+        gRightWidgetExpiryMs = 0;
     }
 }

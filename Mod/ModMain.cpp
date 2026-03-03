@@ -200,6 +200,9 @@ namespace Mod
                 // Clear cached player/controller references
                 GameContext::ClearCache();
 
+                // Clear ModFeedback widget cache to prevent stale widget pointers
+                ModFeedback::ClearWidgetCache();
+
                 // Deactivate cheats
                 Cheats* cheats = GetCheats();
                 if (cheats)

@@ -102,4 +102,7 @@ namespace Mod::ModFeedback
     // Probe and initialise the default sounds folder (sounds/ relative to CWD).
     // Logs whether it exists and scans it. Safe to call at mod startup.
     void InitSoundSystem();
+
+    // Clear cached right-hand widget reference (call on level change to prevent stale pointers).
+    void ClearWidgetCache();
 }

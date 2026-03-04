@@ -45,6 +45,19 @@ namespace Mod
                 return false;
             return defaultValue;
         }
+
+        bool TryParseFloatArg(const std::string& text, float& outValue)
+        {
+            try
+            {
+                outValue = std::stof(text);
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
     }
 
     // Global cheats instance
@@ -844,6 +857,183 @@ namespace Mod
             (void)args;
             g_Cheats.ToggleAnomaliesDisabled();
             return g_Cheats.GetStatus();
+        });
+
+        // -----------------------------------------------------------------
+        // Environment prune debug cheats
+        // -----------------------------------------------------------------
+        Register("plants", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (!world)
+                return "plants: world not ready";
+
+            const float defaultRadius = Cheats::kDefaultEnvironmentPruneRadius;
+            const float defaultInterval = Cheats::kDefaultEnvironmentPruneIntervalSeconds;
+
+            if (!args.empty())
+            {
+                std::string mode = args[0];
+                std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                if (mode == "once")
+                {
+                    float radius = defaultRadius;
+                    if (args.size() >= 2 && !TryParseFloatArg(args[1], radius))
+                        return "plants: invalid radius: " + args[1];
+
+                    return g_Cheats.RemovePlantsBushesOnce(world, radius);
+                }
+            }
+
+            float radius = defaultRadius;
+            float interval = defaultInterval;
+
+            if (args.size() >= 1)
+            {
+                if (!TryParseFloatArg(args[0], radius))
+                    return "plants: invalid radius: " + args[0] + " (usage: plants | plants once [radius] | plants [radius] [intervalSec])";
+            }
+            if (args.size() >= 2)
+            {
+                if (!TryParseFloatArg(args[1], interval))
+                    return "plants: invalid intervalSec: " + args[1];
+            }
+
+            return g_Cheats.TogglePlantsBushesPersistent(radius, interval);
+        });
+
+        Register("trees", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (!world)
+                return "trees: world not ready";
+
+            const float defaultRadius = Cheats::kDefaultEnvironmentPruneRadius;
+            const float defaultInterval = Cheats::kDefaultEnvironmentPruneIntervalSeconds;
+
+            if (!args.empty())
+            {
+                std::string mode = args[0];
+                std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                if (mode == "once")
+                {
+                    float radius = defaultRadius;
+                    if (args.size() >= 2 && !TryParseFloatArg(args[1], radius))
+                        return "trees: invalid radius: " + args[1];
+
+                    return g_Cheats.RemoveTreesOnce(world, radius);
+                }
+            }
+
+            float radius = defaultRadius;
+            float interval = defaultInterval;
+
+            if (args.size() >= 1)
+            {
+                if (!TryParseFloatArg(args[0], radius))
+                    return "trees: invalid radius: " + args[0] + " (usage: trees | trees once [radius] | trees [radius] [intervalSec])";
+            }
+            if (args.size() >= 2)
+            {
+                if (!TryParseFloatArg(args[1], interval))
+                    return "trees: invalid intervalSec: " + args[1];
+            }
+
+            return g_Cheats.ToggleTreesPersistent(radius, interval);
+        });
+
+        Register("foliage", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (!world)
+                return "foliage: world not ready";
+
+            const float defaultRadius = Cheats::kDefaultEnvironmentPruneRadius;
+            const float defaultInterval = Cheats::kDefaultEnvironmentPruneIntervalSeconds;
+
+            if (!args.empty())
+            {
+                std::string mode = args[0];
+                std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                if (mode == "once")
+                {
+                    float radius = defaultRadius;
+                    if (args.size() >= 2 && !TryParseFloatArg(args[1], radius))
+                        return "foliage: invalid radius: " + args[1];
+
+                    return g_Cheats.RemoveFoliageOnce(world, radius);
+                }
+            }
+
+            float radius = defaultRadius;
+            float interval = defaultInterval;
+            if (args.size() >= 1 && !TryParseFloatArg(args[0], radius))
+                return "foliage: invalid radius: " + args[0] + " (usage: foliage | foliage once [radius] | foliage [radius] [intervalSec])";
+            if (args.size() >= 2 && !TryParseFloatArg(args[1], interval))
+                return "foliage: invalid intervalSec: " + args[1];
+
+            return g_Cheats.ToggleFoliagePersistent(radius, interval);
+        });
+
+        Register("grass", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (!world)
+                return "grass: world not ready";
+
+            const float defaultRadius = Cheats::kDefaultEnvironmentPruneRadius;
+            const float defaultInterval = Cheats::kDefaultEnvironmentPruneIntervalSeconds;
+
+            if (!args.empty())
+            {
+                std::string mode = args[0];
+                std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                if (mode == "once")
+                {
+                    float radius = defaultRadius;
+                    if (args.size() >= 2 && !TryParseFloatArg(args[1], radius))
+                        return "grass: invalid radius: " + args[1];
+
+                    return g_Cheats.RemoveGrassOnce(world, radius);
+                }
+            }
+
+            float radius = defaultRadius;
+            float interval = defaultInterval;
+            if (args.size() >= 1 && !TryParseFloatArg(args[0], radius))
+                return "grass: invalid radius: " + args[0] + " (usage: grass | grass once [radius] | grass [radius] [intervalSec])";
+            if (args.size() >= 2 && !TryParseFloatArg(args[1], interval))
+                return "grass: invalid intervalSec: " + args[1];
+
+            return g_Cheats.ToggleGrassPersistent(radius, interval);
+        });
+
+        Register("staticmeshcomponent", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (!world)
+                return "staticmeshcomponent: world not ready";
+
+            const float defaultRadius = Cheats::kDefaultEnvironmentPruneRadius;
+            const float defaultInterval = Cheats::kDefaultEnvironmentPruneIntervalSeconds;
+
+            if (!args.empty())
+            {
+                std::string mode = args[0];
+                std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                if (mode == "once")
+                {
+                    float radius = defaultRadius;
+                    if (args.size() >= 2 && !TryParseFloatArg(args[1], radius))
+                        return "staticmeshcomponent: invalid radius: " + args[1];
+
+                    return g_Cheats.RemoveInstancedStaticMeshOnce(world, radius);
+                }
+            }
+
+            float radius = defaultRadius;
+            float interval = defaultInterval;
+            if (args.size() >= 1 && !TryParseFloatArg(args[0], radius))
+                return "staticmeshcomponent: invalid radius: " + args[0] + " (usage: staticmeshcomponent | staticmeshcomponent once [radius] | staticmeshcomponent [radius] [intervalSec])";
+            if (args.size() >= 2 && !TryParseFloatArg(args[1], interval))
+                return "staticmeshcomponent: invalid intervalSec: " + args[1];
+
+            return g_Cheats.ToggleInstancedStaticMeshPersistent(radius, interval);
         });
 
         // -----------------------------------------------------------------

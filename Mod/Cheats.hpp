@@ -4,6 +4,7 @@
 #include <atomic>
 #include <unordered_map>
 #include <chrono>
+#include <vector>
 
 #include "..\CppSDK\SDK.hpp"
 
@@ -12,6 +13,21 @@ namespace Mod
     class Cheats
     {
     public:
+        enum class EnvironmentPruneCategory
+        {
+            All,
+            PlantsBushes,
+            Trees,
+        };
+
+        enum class EnvironmentPruneSource
+        {
+            All,
+            Foliage,
+            Grass,
+            InstancedStaticMesh,
+        };
+
         Cheats();
         ~Cheats() = default;
 
@@ -91,6 +107,18 @@ namespace Mod
         // Spawn a QuickHeal injector item near the player
         std::string SpawnHealItem(SDK::UWorld* world);
 
+        // Environment debug cheats
+        std::string RemovePlantsBushesOnce(SDK::UWorld* world, float radius);
+        std::string RemoveTreesOnce(SDK::UWorld* world, float radius);
+        std::string TogglePlantsBushesPersistent(float radius, float intervalSeconds);
+        std::string ToggleTreesPersistent(float radius, float intervalSeconds);
+        std::string RemoveFoliageOnce(SDK::UWorld* world, float radius);
+        std::string ToggleFoliagePersistent(float radius, float intervalSeconds);
+        std::string RemoveGrassOnce(SDK::UWorld* world, float radius);
+        std::string ToggleGrassPersistent(float radius, float intervalSeconds);
+        std::string RemoveInstancedStaticMeshOnce(SDK::UWorld* world, float radius);
+        std::string ToggleInstancedStaticMeshPersistent(float radius, float intervalSeconds);
+
         // Get cheat status as string
         std::string GetStatus() const;
 
@@ -106,7 +134,38 @@ namespace Mod
         void SetHungerDisabled(bool enabled);
         void SetFatigueDisabled(bool enabled);
 
+        static constexpr float kDefaultEnvironmentPruneRadius = 4000.0f;
+        static constexpr float kDefaultEnvironmentPruneIntervalSeconds = 15.0f;
+
     private:
+        struct PruneInstancesTarget
+        {
+            SDK::UInstancedStaticMeshComponent* component{nullptr};
+            std::vector<int32_t> instanceIndices;
+            std::string meshName;
+            std::string ownerName;
+        };
+
+        struct PendingPruneBatch
+        {
+            EnvironmentPruneCategory category{EnvironmentPruneCategory::PlantsBushes};
+            EnvironmentPruneSource source{EnvironmentPruneSource::All};
+            bool persistent{false};
+            float radius{0.0f};
+            std::chrono::steady_clock::time_point executeAt{};
+            std::vector<PruneInstancesTarget> instanceTargets;
+        };
+
+        struct EnvironmentPruneRule
+        {
+            bool enabled{false};
+            EnvironmentPruneCategory category{EnvironmentPruneCategory::All};
+            EnvironmentPruneSource source{EnvironmentPruneSource::All};
+            float radius{kDefaultEnvironmentPruneRadius};
+            float intervalSeconds{kDefaultEnvironmentPruneIntervalSeconds};
+            std::chrono::steady_clock::time_point nextCollectAt{};
+        };
+
         std::atomic<bool> godModeActive_{false};
         std::atomic<bool> unlimitedAmmoActive_{false};
         std::atomic<bool> durabilityBypassActive_{false};
@@ -158,5 +217,40 @@ namespace Mod
         SDK::ABP_RadiusPlayerCharacter_Gameplay_C* lastBulletTimePlayer_{nullptr};
         std::chrono::steady_clock::time_point nextAnomalySuppressionAt_{};
         uint32_t portableLightLogCounter_{0};
+
+        // Environment pruning state
+        EnvironmentPruneRule plantsBushesRule_{};
+        EnvironmentPruneRule treesRule_{};
+        EnvironmentPruneRule foliageRule_{};
+        EnvironmentPruneRule grassRule_{};
+        EnvironmentPruneRule instancedStaticMeshRule_{};
+        std::vector<PendingPruneBatch> pendingEnvironmentPruneBatches_{};
+        SDK::UWorld* lastEnvironmentPruneWorld_{nullptr};
+
+        const char* CategoryToLabel(EnvironmentPruneCategory category) const;
+        const char* SourceToLabel(EnvironmentPruneSource source) const;
+        bool MatchesEnvironmentCategory(EnvironmentPruneCategory category, const std::string& name) const;
+        bool MatchesEnvironmentSource(EnvironmentPruneSource source, const SDK::UInstancedStaticMeshComponent* component) const;
+        bool IsWithinRadius(const SDK::FVector& a, const SDK::FVector& b, float radius) const;
+
+        std::string ToggleEnvironmentPersistent(EnvironmentPruneRule& rule, float radius, float intervalSeconds);
+        std::string QueueEnvironmentPruneNow(
+            SDK::UWorld* world,
+            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player,
+            EnvironmentPruneCategory category,
+            EnvironmentPruneSource source,
+            float radius,
+            bool persistent);
+
+        void CollectEnvironmentPruneTargets(
+            SDK::UWorld* world,
+            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player,
+            EnvironmentPruneCategory category,
+            EnvironmentPruneSource source,
+            float radius,
+            PendingPruneBatch& batch);
+
+        void UpdateEnvironmentPrune(SDK::UWorld* world, SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player);
+        void ExecuteDueEnvironmentPruneBatches();
     };
 }

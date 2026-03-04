@@ -100,6 +100,83 @@ Toggle anomaly suppression. Destroys existing anomalies and prevents new ones.
 anomalies
 ```
 
+### plants
+Toggle persistent removal of plant/bush foliage instances in a radius around the player, or run a one-shot delayed cleanup.
+
+```
+plants
+plants once [radius]
+plants [radius] [intervalSec]
+```
+
+**Behavior:**
+- Collects targets first, then waits 1 second before deleting.
+- Validates targets again before delete to avoid deleting already-culled objects.
+
+**Parameters:**
+- `radius` - Removal radius in Unreal units (default: `4000`)
+- `intervalSec` - Persistent collect interval seconds (default: `15`)
+
+**Examples:**
+```
+plants              # Toggle persistent cleanup on/off at 4000 radius, 15s interval
+plants once         # One-shot cleanup around player (4000 radius)
+plants once 2500    # One-shot cleanup in 2500 radius
+plants 5000 8       # Toggle persistent mode with 5000 radius, 8s interval
+```
+
+### trees
+Toggle persistent removal of tree foliage instances in a radius around the player, or run a one-shot delayed cleanup.
+
+```
+trees
+trees once [radius]
+trees [radius] [intervalSec]
+```
+
+**Behavior:**
+- Collects targets first, then waits 1 second before deleting.
+- Validates targets again before delete to avoid deleting already-culled objects.
+
+**Parameters:**
+- `radius` - Removal radius in Unreal units (default: `4000`)
+- `intervalSec` - Persistent collect interval seconds (default: `15`)
+
+**Examples:**
+```
+trees              # Toggle persistent cleanup on/off at 4000 radius, 15s interval
+trees once         # One-shot cleanup around player (4000 radius)
+trees once 3500    # One-shot cleanup in 3500 radius
+trees 6000 10      # Toggle persistent mode with 6000 radius, 10s interval
+```
+
+### foliage
+Toggle persistent removal for `UFoliageInstancedStaticMeshComponent` instances, or run a one-shot delayed cleanup.
+
+```
+foliage
+foliage once [radius]
+foliage [radius] [intervalSec]
+```
+
+### grass
+Toggle persistent removal for `UGrassInstancedStaticMeshComponent` instances, or run a one-shot delayed cleanup.
+
+```
+grass
+grass once [radius]
+grass [radius] [intervalSec]
+```
+
+### staticmeshcomponent
+Toggle persistent removal for all `UInstancedStaticMeshComponent` instances, or run a one-shot delayed cleanup.
+
+```
+staticmeshcomponent
+staticmeshcomponent once [radius]
+staticmeshcomponent [radius] [intervalSec]
+```
+
 ### automag
 Toggle auto-refilling magazines in magazine pouches.
 

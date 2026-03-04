@@ -113,7 +113,7 @@ namespace Mod
             return;
 
         int itemCount = static_cast<int>(items_.size());
-        float height = (std::max)(600.0f, static_cast<float>(itemCount * 100));
+        float height = (std::max)(400.0f, static_cast<float>(itemCount * 50));
         
         SDK::FVector2D newSize{600.0, height};
         player->W_GripDebug_L->SetDrawSize(newSize);
@@ -129,7 +129,7 @@ namespace Mod
         // edge clears the hand grip even if the game blueprint resets the pivot.
         // Scale with item count so taller menus float higher.
         // Units are UE cm. Each item is ~5 cm, we lift by 1 cm per item as a safety margin.
-        const float kLiftPerItemCm = 2.0f;
+        const float kLiftPerItemCm = 1.0f;
         float zLiftCm = static_cast<float>(itemCount) * kLiftPerItemCm;
         SDK::FHitResult dummyHit{};
         player->W_GripDebug_L->K2_SetRelativeLocation(

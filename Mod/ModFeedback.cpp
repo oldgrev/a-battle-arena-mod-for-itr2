@@ -468,15 +468,28 @@ namespace Mod::ModFeedback
             SDK::FString msgStr = MakeStableFString(msg);
             SDK::FText msgText = SDK::UKismetTextLibrary::Conv_StringToText(msgStr);
 
+            // Log what text we're trying to set (truncate for logging)
+            std::wstring logMsg = msg.size() > 50 ? msg.substr(0, 47) + L"..." : msg;
+            if (gRHLogCount++ < kRHLogLimit)
+                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: setting text: \"" << SDK::FString(logMsg.c_str()).ToString() << "\"");
+
             gRightWidget->Description = msgText;
             if (gRightWidget->Txt_TextConfirm)
             {
                 gRightWidget->Txt_TextConfirm->SetText(msgText);
+                
+                // Force text block to recognize the update
+                // Try multiple approaches since UE widget updates can be finicky
+                // Approach 1: Modify style to trigger a visual update
                 SDK::FTextBlockStyle style = gRightWidget->Txt_TextConfirm->WidgetStyle;
                 style.ColorAndOpacity.SpecifiedColor = SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f};
                 gRightWidget->Txt_TextConfirm->SetWidgetStyle(style);
+                
+                // Approach 2: Force invalidation via render opacity (always valid)
+                gRightWidget->Txt_TextConfirm->SetRenderOpacity(1.0f);
+                
                 if (gRHLogCount++ < kRHLogLimit)
-                    LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: set text on Txt_TextConfirm");
+                    LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: text set on Txt_TextConfirm");
             }
             else
             {
@@ -507,6 +520,14 @@ namespace Mod::ModFeedback
             bool wasHidden = !comp->IsVisible();
             comp->SetVisibility(true, true);
             comp->SetHiddenInGame(false, true);
+            
+            // FIX FOR STUCK TEXT: Re-set the widget on the component to force a full refresh
+            // This ensures the widget component picks up the new text content
+            if (gRHLogCount++ < kRHLogLimit)
+                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: re-setting widget on component to force update");
+            comp->SetWidget(nullptr);
+            comp->SetWidget(gRightWidget);
+            
             comp->RequestRedraw();
 
             if (gRHLogCount++ < kRHLogLimit)

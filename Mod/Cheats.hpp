@@ -112,12 +112,6 @@ namespace Mod
         std::string RemoveTreesOnce(SDK::UWorld* world, float radius);
         std::string TogglePlantsBushesPersistent(float radius, float intervalSeconds);
         std::string ToggleTreesPersistent(float radius, float intervalSeconds);
-        std::string RemoveFoliageOnce(SDK::UWorld* world, float radius);
-        std::string ToggleFoliagePersistent(float radius, float intervalSeconds);
-        std::string RemoveGrassOnce(SDK::UWorld* world, float radius);
-        std::string ToggleGrassPersistent(float radius, float intervalSeconds);
-        std::string RemoveInstancedStaticMeshOnce(SDK::UWorld* world, float radius);
-        std::string ToggleInstancedStaticMeshPersistent(float radius, float intervalSeconds);
 
         // Get cheat status as string
         std::string GetStatus() const;
@@ -221,9 +215,6 @@ namespace Mod
         // Environment pruning state
         EnvironmentPruneRule plantsBushesRule_{};
         EnvironmentPruneRule treesRule_{};
-        EnvironmentPruneRule foliageRule_{};
-        EnvironmentPruneRule grassRule_{};
-        EnvironmentPruneRule instancedStaticMeshRule_{};
         std::vector<PendingPruneBatch> pendingEnvironmentPruneBatches_{};
         SDK::UWorld* lastEnvironmentPruneWorld_{nullptr};
 

@@ -113,7 +113,7 @@ namespace Mod
             return;
 
         int itemCount = static_cast<int>(items_.size());
-        float height = (std::max)(400.0f, static_cast<float>(itemCount * 50));
+        float height = (std::max)(700.0f, static_cast<float>(itemCount * 50));
         
         SDK::FVector2D newSize{600.0, height};
         player->W_GripDebug_L->SetDrawSize(newSize);

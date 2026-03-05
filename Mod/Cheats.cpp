@@ -103,15 +103,6 @@ namespace Mod
 
         treesRule_.category = EnvironmentPruneCategory::Trees;
         treesRule_.source = EnvironmentPruneSource::All;
-
-        foliageRule_.category = EnvironmentPruneCategory::All;
-        foliageRule_.source = EnvironmentPruneSource::Foliage;
-
-        grassRule_.category = EnvironmentPruneCategory::All;
-        grassRule_.source = EnvironmentPruneSource::Grass;
-
-        instancedStaticMeshRule_.category = EnvironmentPruneCategory::All;
-        instancedStaticMeshRule_.source = EnvironmentPruneSource::InstancedStaticMesh;
     }
 
     void Cheats::ToggleGodMode()
@@ -412,12 +403,6 @@ namespace Mod
              << " [radius=" << plantsBushesRule_.radius << ", interval=" << plantsBushesRule_.intervalSeconds << "s]\n";
          status << "  Remove Trees (persistent): " << (treesRule_.enabled ? "ON" : "off")
              << " [radius=" << treesRule_.radius << ", interval=" << treesRule_.intervalSeconds << "s]\n";
-         status << "  Remove Foliage (persistent): " << (foliageRule_.enabled ? "ON" : "off")
-             << " [radius=" << foliageRule_.radius << ", interval=" << foliageRule_.intervalSeconds << "s]\n";
-         status << "  Remove Grass (persistent): " << (grassRule_.enabled ? "ON" : "off")
-             << " [radius=" << grassRule_.radius << ", interval=" << grassRule_.intervalSeconds << "s]\n";
-         status << "  Remove ISM (persistent): " << (instancedStaticMeshRule_.enabled ? "ON" : "off")
-             << " [radius=" << instancedStaticMeshRule_.radius << ", interval=" << instancedStaticMeshRule_.intervalSeconds << "s]\n";
         status << "  Debug Mode: " << (debugModeActive_ ? "ON" : "off");
         return status.str();
     }
@@ -436,9 +421,6 @@ namespace Mod
         if (autoMagActive_) ToggleAutoMag();
         plantsBushesRule_.enabled = false;
         treesRule_.enabled = false;
-        foliageRule_.enabled = false;
-        grassRule_.enabled = false;
-        instancedStaticMeshRule_.enabled = false;
         pendingEnvironmentPruneBatches_.clear();
         // Note: anomaliesDisabled_ is NOT toggled on level change -- it persists intentionally.
 
@@ -1072,79 +1054,124 @@ namespace Mod
             center = player->K2_GetActorLocation();
         }
 
-        if (!SDK::UObject::GObjects)
-            return;
+        int32_t scannedComponents = 0;
+        int32_t categoryMatches = 0;
+        int32_t queuedComponents = 0;
+        int32_t queuedInstances = 0;
 
-        const int32_t totalObjects = SDK::UObject::GObjects->Num();
-        for (int32_t i = 0; i < totalObjects; ++i)
+        auto collectFromActorClass = [&](SDK::UClass* actorClass, const char* actorClassLabel)
         {
-            SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(i);
-            if (!obj || !obj->IsA(SDK::UInstancedStaticMeshComponent::StaticClass()))
-                continue;
+            if (!actorClass)
+                return;
 
-            auto* component = static_cast<SDK::UInstancedStaticMeshComponent*>(obj);
-            if (!component || component->IsDefaultObject() || !SDK::UKismetSystemLibrary::IsValid(component))
-                continue;
+            SDK::TArray<SDK::AActor*> actors;
+            SDK::UGameplayStatics::GetAllActorsOfClass(world, actorClass, &actors);
 
-            if (!MatchesEnvironmentSource(source, component))
-                continue;
+            const int32_t actorCount = GetTArrayNum(actors);
+            SDK::AActor** actorData = GetTArrayData(actors);
+            LOG_INFO("[Cheats] Prune scan class=" << actorClassLabel << " actors=" << actorCount);
 
-            std::string meshName;
-            if (component->StaticMesh)
+            for (int32_t ai = 0; ai < actorCount; ++ai)
             {
-                meshName = component->StaticMesh->GetName();
-            }
+                SDK::AActor* actor = actorData[ai];
+                if (!actor || !SDK::UKismetSystemLibrary::IsValid(actor))
+                    continue;
 
-            std::string ownerName;
-            if (SDK::AActor* owner = component->GetOwner())
-            {
-                ownerName = owner->GetName();
-            }
+                SDK::TArray<SDK::UActorComponent*> components = actor->K2_GetComponentsByClass(SDK::UInstancedStaticMeshComponent::StaticClass());
+                const int32_t compCount = GetTArrayNum(components);
+                SDK::UActorComponent** compData = GetTArrayData(components);
 
-            if (!MatchesEnvironmentCategory(category, meshName) &&
-                !MatchesEnvironmentCategory(category, ownerName) &&
-                !MatchesEnvironmentCategory(category, component->GetName()))
-            {
-                continue;
-            }
-
-            std::vector<int32_t> indices;
-            if (useRadius)
-            {
-                SDK::TArray<int32_t> overlapping = component->GetInstancesOverlappingSphere(center, radius, true);
-                const int32_t overlapCount = GetTArrayNum(overlapping);
-                int32_t* overlapData = GetTArrayData(overlapping);
-                for (int32_t idx = 0; idx < overlapCount; ++idx)
+                for (int32_t ci = 0; ci < compCount; ++ci)
                 {
-                    if (component->IsValidInstance(overlapData[idx]))
+                    SDK::UActorComponent* baseComp = compData[ci];
+                    if (!baseComp || !baseComp->IsA(SDK::UInstancedStaticMeshComponent::StaticClass()))
+                        continue;
+
+                    auto* component = static_cast<SDK::UInstancedStaticMeshComponent*>(baseComp);
+                    if (!component || component->IsDefaultObject() || !SDK::UKismetSystemLibrary::IsValid(component))
+                        continue;
+
+                    if (!MatchesEnvironmentSource(source, component))
+                        continue;
+
+                    scannedComponents++;
+
+                    std::string meshName;
+                    if (component->StaticMesh)
+                        meshName = component->StaticMesh->GetName();
+
+                    std::string ownerName;
+                    if (SDK::AActor* owner = component->GetOwner())
+                        ownerName = owner->GetName();
+
+                    const std::string componentName = component->GetName();
+                    const int32_t instanceCount = component->GetInstanceCount();
+                    LOG_INFO("[Cheats] Checking component class=" << actorClassLabel
+                        << " comp=" << componentName
+                        << " owner=" << ownerName
+                        << " mesh=" << meshName
+                        << " instances=" << instanceCount);
+
+                    if (!MatchesEnvironmentCategory(category, meshName) &&
+                        !MatchesEnvironmentCategory(category, ownerName) &&
+                        !MatchesEnvironmentCategory(category, componentName))
                     {
-                        indices.push_back(overlapData[idx]);
+                        continue;
+                    }
+
+                    categoryMatches++;
+
+                    std::vector<int32_t> indices;
+                    if (useRadius)
+                    {
+                        SDK::TArray<int32_t> overlapping = component->GetInstancesOverlappingSphere(center, radius, true);
+                        const int32_t overlapCount = GetTArrayNum(overlapping);
+                        int32_t* overlapData = GetTArrayData(overlapping);
+                        for (int32_t idx = 0; idx < overlapCount; ++idx)
+                        {
+                            if (component->IsValidInstance(overlapData[idx]))
+                            {
+                                indices.push_back(overlapData[idx]);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        indices.reserve(static_cast<size_t>(instanceCount));
+                        for (int32_t idx = 0; idx < instanceCount; ++idx)
+                        {
+                            if (component->IsValidInstance(idx))
+                            {
+                                indices.push_back(idx);
+                            }
+                        }
+                    }
+
+                    if (!indices.empty())
+                    {
+                        PruneInstancesTarget target;
+                        target.component = component;
+                        target.instanceIndices = std::move(indices);
+                        target.meshName = meshName;
+                        target.ownerName = ownerName;
+                        queuedComponents++;
+                        queuedInstances += static_cast<int32_t>(target.instanceIndices.size());
+                        batch.instanceTargets.push_back(std::move(target));
                     }
                 }
             }
-            else
-            {
-                const int32_t count = component->GetInstanceCount();
-                indices.reserve(static_cast<size_t>(count));
-                for (int32_t idx = 0; idx < count; ++idx)
-                {
-                    if (component->IsValidInstance(idx))
-                    {
-                        indices.push_back(idx);
-                    }
-                }
-            }
+        };
 
-            if (!indices.empty())
-            {
-                PruneInstancesTarget target;
-                target.component = component;
-                target.instanceIndices = std::move(indices);
-                target.meshName = meshName;
-                target.ownerName = ownerName;
-                batch.instanceTargets.push_back(std::move(target));
-            }
-        }
+        collectFromActorClass(SDK::AInstancedFoliageActor::StaticClass(), "InstancedFoliageActor");
+        collectFromActorClass(SDK::ALandscapeProxy::StaticClass(), "LandscapeProxy");
+
+        LOG_INFO("[Cheats] Prune collect summary category=" << CategoryToLabel(category)
+            << " source=" << SourceToLabel(source)
+            << " scannedComponents=" << scannedComponents
+            << " categoryMatches=" << categoryMatches
+            << " queuedComponents=" << queuedComponents
+            << " queuedInstances=" << queuedInstances
+            << " radius=" << radius);
     }
 
     void Cheats::ExecuteDueEnvironmentPruneBatches()
@@ -1170,27 +1197,45 @@ namespace Mod
                 if (!instanceTarget.component || !SDK::UKismetSystemLibrary::IsValid(instanceTarget.component))
                     continue;
 
-                SDK::TArray<int32_t> validIndices;
+                std::vector<int32_t> validIndices;
+                validIndices.reserve(instanceTarget.instanceIndices.size());
                 for (int32_t idx : instanceTarget.instanceIndices)
                 {
                     if (instanceTarget.component->IsValidInstance(idx))
                     {
-                        validIndices.Add(idx);
+                        validIndices.push_back(idx);
                     }
                 }
 
-                const int32_t validCount = GetTArrayNum(validIndices);
-                if (validCount > 0)
+                const int32_t validCount = static_cast<int32_t>(validIndices.size());
+                if (validCount <= 0)
+                    continue;
+
+                const int32_t currentCount = instanceTarget.component->GetInstanceCount();
+                if (currentCount > 0 && validCount >= currentCount)
                 {
-                    if (instanceTarget.component->RemoveInstances(validIndices))
+                    instanceTarget.component->ClearInstances();
+                    removedInstances += validCount;
+                    continue;
+                }
+
+                std::sort(validIndices.begin(), validIndices.end(), std::greater<int32_t>());
+                int removedFromComponent = 0;
+                for (int32_t idx : validIndices)
+                {
+                    if (instanceTarget.component->IsValidInstance(idx) && instanceTarget.component->RemoveInstance(idx))
                     {
-                        removedInstances += validCount;
-                    }
-                    else
-                    {
-                        LOG_WARN("[Cheats] Environment prune RemoveInstances failed for mesh=" << instanceTarget.meshName);
+                        removedFromComponent++;
                     }
                 }
+
+                if (removedFromComponent == 0)
+                {
+                    LOG_WARN("[Cheats] Environment prune removed 0 instances for mesh=" << instanceTarget.meshName
+                        << " owner=" << instanceTarget.ownerName
+                        << " validQueued=" << validCount);
+                }
+                removedInstances += removedFromComponent;
             }
 
             LOG_INFO("[Cheats] Environment prune executed category=" << CategoryToLabel(it->category)
@@ -1215,9 +1260,6 @@ namespace Mod
             pendingEnvironmentPruneBatches_.clear();
             plantsBushesRule_.nextCollectAt = std::chrono::steady_clock::time_point{};
             treesRule_.nextCollectAt = std::chrono::steady_clock::time_point{};
-            foliageRule_.nextCollectAt = std::chrono::steady_clock::time_point{};
-            grassRule_.nextCollectAt = std::chrono::steady_clock::time_point{};
-            instancedStaticMeshRule_.nextCollectAt = std::chrono::steady_clock::time_point{};
             LOG_INFO("[Cheats] Environment prune world changed - pending batches cleared");
         }
 
@@ -1238,9 +1280,6 @@ namespace Mod
 
         updateRule(EnvironmentPruneCategory::PlantsBushes, plantsBushesRule_);
         updateRule(EnvironmentPruneCategory::Trees, treesRule_);
-        updateRule(EnvironmentPruneCategory::All, foliageRule_);
-        updateRule(EnvironmentPruneCategory::All, grassRule_);
-        updateRule(EnvironmentPruneCategory::All, instancedStaticMeshRule_);
 
         ExecuteDueEnvironmentPruneBatches();
     }
@@ -1263,36 +1302,6 @@ namespace Mod
     std::string Cheats::ToggleTreesPersistent(float radius, float intervalSeconds)
     {
         return ToggleEnvironmentPersistent(treesRule_, radius, intervalSeconds);
-    }
-
-    std::string Cheats::RemoveFoliageOnce(SDK::UWorld* world, float radius)
-    {
-        return QueueEnvironmentPruneNow(world, FindPlayer(world), EnvironmentPruneCategory::All, EnvironmentPruneSource::Foliage, radius, false);
-    }
-
-    std::string Cheats::ToggleFoliagePersistent(float radius, float intervalSeconds)
-    {
-        return ToggleEnvironmentPersistent(foliageRule_, radius, intervalSeconds);
-    }
-
-    std::string Cheats::RemoveGrassOnce(SDK::UWorld* world, float radius)
-    {
-        return QueueEnvironmentPruneNow(world, FindPlayer(world), EnvironmentPruneCategory::All, EnvironmentPruneSource::Grass, radius, false);
-    }
-
-    std::string Cheats::ToggleGrassPersistent(float radius, float intervalSeconds)
-    {
-        return ToggleEnvironmentPersistent(grassRule_, radius, intervalSeconds);
-    }
-
-    std::string Cheats::RemoveInstancedStaticMeshOnce(SDK::UWorld* world, float radius)
-    {
-        return QueueEnvironmentPruneNow(world, FindPlayer(world), EnvironmentPruneCategory::All, EnvironmentPruneSource::InstancedStaticMesh, radius, false);
-    }
-
-    std::string Cheats::ToggleInstancedStaticMeshPersistent(float radius, float intervalSeconds)
-    {
-        return ToggleEnvironmentPersistent(instancedStaticMeshRule_, radius, intervalSeconds);
     }
 
     void Cheats::ApplyAnomalySuppression(SDK::UWorld* world)

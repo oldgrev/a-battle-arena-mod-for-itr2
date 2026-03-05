@@ -150,33 +150,6 @@ trees once 3500    # One-shot cleanup in 3500 radius
 trees 6000 10      # Toggle persistent mode with 6000 radius, 10s interval
 ```
 
-### foliage
-Toggle persistent removal for `UFoliageInstancedStaticMeshComponent` instances, or run a one-shot delayed cleanup.
-
-```
-foliage
-foliage once [radius]
-foliage [radius] [intervalSec]
-```
-
-### grass
-Toggle persistent removal for `UGrassInstancedStaticMeshComponent` instances, or run a one-shot delayed cleanup.
-
-```
-grass
-grass once [radius]
-grass [radius] [intervalSec]
-```
-
-### staticmeshcomponent
-Toggle persistent removal for all `UInstancedStaticMeshComponent` instances, or run a one-shot delayed cleanup.
-
-```
-staticmeshcomponent
-staticmeshcomponent once [radius]
-staticmeshcomponent [radius] [intervalSec]
-```
-
 ### automag
 Toggle auto-refilling magazines in magazine pouches.
 

@@ -59,6 +59,7 @@
 #include "ModTuning.hpp"
 #include "FriendSubsystem.hpp"
 #include "VRMenuSubsystem.hpp"
+#include "HandWidgetTestHarness.hpp"
 #include "..\CppSDK\SDK.hpp"
 
 
@@ -137,9 +138,16 @@ namespace Mod
         Mod::VRMenuSubsystem::Get()->Initialize();
         LOG_INFO("[mod] VR Menu subsystem initialized");
 
+        // Initialize portable hand widget test harness
+        PortableWidget::HandWidgetTestHarness::Get()->Initialize();
+        LOG_INFO("[mod] HandWidget test harness initialized");
+
         // Create command handler with all commands
         CommandHandlerRegistry commandHandler;
         commandHandler.InitializeDefaults();
+
+        // Register hand widget test harness commands
+        PortableWidget::HandWidgetTestHarness::Get()->RegisterCommands(commandHandler);
 
         // Create TCP server
         CommandQueue commandQueue;
@@ -203,6 +211,10 @@ namespace Mod
                 // Clear ModFeedback widget cache to prevent stale widget pointers
                 ModFeedback::ClearWidgetCache();
 
+                // Shutdown portable hand widgets on level change (stale UObject pointers)
+                PortableWidget::HandWidgetTestHarness::Get()->Shutdown();
+                PortableWidget::HandWidgetTestHarness::Get()->Initialize();
+
                 // Deactivate cheats
                 Cheats* cheats = GetCheats();
                 if (cheats)
@@ -265,6 +277,9 @@ namespace Mod
 
             // Update VR Menu subsystem (renders menu if open, both approaches)
             Mod::VRMenuSubsystem::Get()->Update(world);
+
+            // Update portable hand widget test harness
+            PortableWidget::HandWidgetTestHarness::Get()->Tick(world);
         }
     }
 }

@@ -173,6 +173,11 @@
     <ClInclude Include="Mod\RuntimeState.hpp" />
     <ClInclude Include="Mod\TcpServer.hpp" />
     <ClInclude Include="Mod\VRMenuSubsystem.hpp" />
+    <ClInclude Include="Mod\HandWidget.hpp" />
+    <ClInclude Include="Mod\HandWidgetNotification.hpp" />
+    <ClInclude Include="Mod\HandWidgetMenu.hpp" />
+    <ClInclude Include="Mod\HandWidgetMultiplexer.hpp" />
+    <ClInclude Include="Mod\HandWidgetTestHarness.hpp" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
@@ -208,6 +213,11 @@
     <ClCompile Include="Mod\MenuPocSubsystem.cpp" />
     <ClCompile Include="Mod\RuntimeState.cpp" />
     <ClCompile Include="Mod\TcpServer.cpp" />
+    <ClCompile Include="Mod\HandWidget.cpp" />
+    <ClCompile Include="Mod\HandWidgetNotification.cpp" />
+    <ClCompile Include="Mod\HandWidgetMenu.cpp" />
+    <ClCompile Include="Mod\HandWidgetMultiplexer.cpp" />
+    <ClCompile Include="Mod\HandWidgetTestHarness.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

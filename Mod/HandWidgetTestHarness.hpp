@@ -2,19 +2,20 @@
 
 /*
 AILEARNINGS:
-- HandWidgetTestHarness is the integration point that creates and wires up the new
-  portable widget system for testing.
-- It creates HandWidget instances for left and right hands, sets up menus and notifications,
-  creates multiplexers, and provides input routing.
-- It's designed to be initialized from ModMain and ticked from ModMain::OnTick.
-- TCP commands are registered for remote testing (e.g. "hwtest notif Hello World").
-- For initial testing this runs ALONGSIDE the existing VRMenuSubsystem/ModFeedback.
-  Once confirmed working, the old code can be replaced.
+- HandWidgetTestHarness is the mod's integration point that wires the portable HandWidget
+  system into the battle arena mod. It owns all HandWidget/Menu/Notification/Multiplexer
+  instances, handles input routing, and provides a public ShowNotification() API that
+  replaces the old ModFeedback::ShowOnRightWidget path.
+- Initialization and Tick are called from ModMain. Input hooks route from HookManager.
+- On level change, Shutdown() + Initialize() must be called to clear stale UObject pointers.
+- Arena config state (enemy count, wave count) and friend class selection live here
+  because they need to persist across menu open/close cycles.
 */
 
 #include <string>
 #include <memory>
 #include <vector>
+#include <atomic>
 
 namespace SDK
 {
@@ -39,14 +40,18 @@ namespace PortableWidget
     public:
         static HandWidgetTestHarness* Get();
 
-        // Initialize the test harness. Call once from ModMain.
+        // Initialize all subsystems. Call once from ModMain::Run().
         void Initialize();
 
         // Tick — call from ModMain::OnTick(world).
         void Tick(SDK::UWorld* world);
 
-        // Register test TCP commands.
+        // Register TCP commands (hwtest ...).
         void RegisterCommands(Mod::CommandHandlerRegistry& registry);
+
+        // --- Public notification API (replaces ModFeedback::ShowOnRightWidget) ---
+        void ShowNotification(const std::wstring& text, float durationSeconds = 3.0f);
+        void ShowNotificationWithTitle(const std::wstring& title, const std::wstring& text, float durationSeconds = 3.0f);
 
         // --- Input routing (called from HookManager hooks) ---
 
@@ -58,6 +63,11 @@ namespace PortableWidget
 
         // B/Y without grip (when menu open) = select. Returns true to suppress.
         bool OnSelect();
+
+        // Grip state tracking
+        void OnGripPressed();
+        void OnGripReleased();
+        bool IsGripHeld() const;
 
         // Is the menu currently open?
         bool IsMenuOpen() const;
@@ -71,8 +81,8 @@ namespace PortableWidget
         bool initialized_ = false;
 
         // Left hand - two HandWidgets: one for menu layer, one for notification layer
-        std::unique_ptr<HandWidget> leftMenuHW_;       // HandWidget for menu layer
-        std::unique_ptr<HandWidget> leftNotifHW_;      // HandWidget for notification layer
+        std::unique_ptr<HandWidget> leftMenuHW_;
+        std::unique_ptr<HandWidget> leftNotifHW_;
         std::unique_ptr<HandWidgetMenu> leftMenu_;
         std::unique_ptr<HandWidgetNotification> leftNotif_;
         std::unique_ptr<HandWidgetMultiplexer> leftMux_;
@@ -86,9 +96,26 @@ namespace PortableWidget
         bool leftBound_ = false;
         bool rightBound_ = false;
 
+        // Grip tracking for combo activation
+        std::atomic<bool> gripHeld_{false};
+
+        // --- Persistent menu state (survives menu close/reopen) ---
+        int arenaEnemyCount_ = 200;
+        int arenaWaveCount_ = 5;
+        std::string selectedFriendClass_;
+
         // Helpers
         void EnsureBindings(SDK::UWorld* world);
-        void BuildTestMenuPages();
+        void BuildMenuPages();
+
+        // Page builders
+        void BuildMainPage();
+        void BuildCheatsPage();
+        void BuildArenaPage();
+        void BuildLoadoutsPage();
+        void BuildLoadoutSelectPage();
+        void BuildSpawnFriendPage();
+        void BuildFriendClassPage();
 
         // Command handlers
         std::string HandleTestCommand(SDK::UWorld* world, const std::vector<std::string>& args);

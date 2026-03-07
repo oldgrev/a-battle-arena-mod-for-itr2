@@ -26,7 +26,6 @@ Solution: add short aliases and a one-shot "vr_diag" command to enable/disable t
 #include "ModTuning.hpp"
 #include "HookManager.hpp"
 #include "FriendSubsystem.hpp"
-#include "MenuPocSubsystem.hpp"
 
 namespace Mod
 {
@@ -891,64 +890,6 @@ namespace Mod
         //     return g_Cheats.SpawnHealItem(world);
         // });
 
-        // -----------------------------------------------------------------
-        // Menu POC commands (poc1-poc6)
-        // -----------------------------------------------------------------
-        Register("poc1", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc1_SwitchIngameMenu();
-        });
-
-        Register("poc2", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc2_AttachWidgetToLeftHand();
-        });
-
-        Register("poc3", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc3_ShowCheatPanel();
-        });
-
-        Register("poc4", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc4_SpawnIngameMenuActor();
-        });
-
-        Register("poc5", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc5_UseInfoPanel();
-        });
-
-        Register("poc6", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc6_SpawnFaceFollowingMenu();
-        });
-
-        Register("poc7", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc7_CreateUserWidget();
-        });
-
-        Register("poc8", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc8_SpawnConfirmation();
-        });
-
-        Register("poc9", [](SDK::UWorld* world, const std::vector<std::string>& args) -> std::string
-                 {
-            (void)world; (void)args;
-            return Mod::MenuPoc::Poc9_CreateConfirmWidgetOnHand();
-        });
-
-        LOG_INFO("[Command] Menu POC commands registered (poc1-poc9)");
     }
 
     // Expose cheats update for main loop

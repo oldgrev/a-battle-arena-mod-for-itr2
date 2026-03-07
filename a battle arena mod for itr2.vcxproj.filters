@@ -75,9 +75,6 @@
     <ClInclude Include="Mod\SpatialAudio.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Mod\VRMenuSubsystem.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -108,9 +105,6 @@
       <Filter>Source Files\Mod</Filter>
     </ClCompile>
     <ClCompile Include="Mod\SpatialAudio.cpp">
-      <Filter>Source Files\Mod</Filter>
-    </ClCompile>
-    <ClCompile Include="Mod\VRMenuSubsystem.cpp">
       <Filter>Source Files\Mod</Filter>
     </ClCompile>
     <ClCompile Include="Mod\ModMain.cpp">

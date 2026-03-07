@@ -58,7 +58,6 @@
 #include "ModFeedback.hpp"
 #include "ModTuning.hpp"
 #include "FriendSubsystem.hpp"
-#include "VRMenuSubsystem.hpp"
 #include "HandWidgetTestHarness.hpp"
 #include "..\CppSDK\SDK.hpp"
 
@@ -134,10 +133,6 @@ namespace Mod
         // Initialize sound system (scan sounds/ folder if present).
         Mod::ModFeedback::InitSoundSystem();
 
-        // Initialize VR menu subsystem
-        Mod::VRMenuSubsystem::Get()->Initialize();
-        LOG_INFO("[mod] VR Menu subsystem initialized");
-
         // Initialize portable hand widget test harness
         PortableWidget::HandWidgetTestHarness::Get()->Initialize();
         LOG_INFO("[mod] HandWidget test harness initialized");
@@ -208,9 +203,6 @@ namespace Mod
                 // Clear cached player/controller references
                 GameContext::ClearCache();
 
-                // Clear ModFeedback widget cache to prevent stale widget pointers
-                ModFeedback::ClearWidgetCache();
-
                 // Shutdown portable hand widgets on level change (stale UObject pointers)
                 PortableWidget::HandWidgetTestHarness::Get()->Shutdown();
                 PortableWidget::HandWidgetTestHarness::Get()->Initialize();
@@ -274,9 +266,6 @@ namespace Mod
 
             // Update Friend subsystem
             Mod::Friend::FriendSubsystem::Get()->Update(world);
-
-            // Update VR Menu subsystem (renders menu if open, both approaches)
-            Mod::VRMenuSubsystem::Get()->Update(world);
 
             // Update portable hand widget test harness
             PortableWidget::HandWidgetTestHarness::Get()->Tick(world);

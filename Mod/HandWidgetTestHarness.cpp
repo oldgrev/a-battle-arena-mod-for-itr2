@@ -1,13 +1,12 @@
 /*
 AILEARNINGS:
-- HandWidgetTestHarness integrates the portable widget system into the existing mod.
-- It creates separate HandWidget instances for menu (left hand) and notifications (right hand).
-- The left hand uses a multiplexer so both menu AND notifications can share it.
-- The right hand also has a multiplexer for notifications only (extensible).
-- EnsureBindings() is called every tick to handle level transitions/player respawns.
-- Test commands: "hwtest notif <text>", "hwtest menu", "hwtest clear", etc.
-- During initial testing, this runs ALONGSIDE the existing systems. Once verified,
-  the old VRMenuSubsystem and ModFeedback right-hand code can be replaced.
+- HandWidgetTestHarness is the mod's main integration of the portable HandWidget system.
+- All 7 menu pages from the old VRMenuSubsystem are ported here as RegisterPage() calls.
+- ShowNotification() is the public API that replaces ModFeedback::ShowOnRightWidget.
+- Grip state tracking lives here (moved from VRMenuSubsystem) for combo input detection.
+- Arena config state (enemy/wave counts) and friend class selection persist across menu close/reopen.
+- On level change, Shutdown() + Initialize() is called from ModMain to clear stale UObject pointers.
+  The persistent menu state (arenaEnemyCount_, etc.) is preserved because they're on the singleton.
 */
 
 #include "HandWidgetTestHarness.hpp"
@@ -18,14 +17,33 @@ AILEARNINGS:
 #include "Logging.hpp"
 #include "GameContext.hpp"
 #include "CommandHandler.hpp"
+#include "Cheats.hpp"
+#include "ArenaSubsystem.hpp"
+#include "FriendSubsystem.hpp"
+#include "LoadoutSubsystem.hpp"
 
 #include "..\CppSDK\SDK.hpp"
 
 #include <sstream>
 #include <algorithm>
 
+namespace Mod { class Cheats; Cheats* GetCheats(); }
+
 namespace PortableWidget
 {
+    namespace Arena = Mod::Arena;  // Alias so Arena::ArenaSubsystem resolves
+
+    // =========================================================================
+    // Menu page IDs — match the old VRMenuSubsystem page structure
+    // =========================================================================
+    static constexpr int kPageMain          = 0;
+    static constexpr int kPageCheats        = 1;
+    static constexpr int kPageArena         = 2;
+    static constexpr int kPageLoadouts      = 3;
+    static constexpr int kPageLoadoutSelect = 4;
+    static constexpr int kPageSpawnFriend   = 5;
+    static constexpr int kPageFriendClass   = 6;
+
     // =========================================================================
     // Singleton
     // =========================================================================
@@ -42,15 +60,13 @@ namespace PortableWidget
     {
         if (initialized_)
         {
-            LOG_INFO("[HWTest] Already initialized");
+            LOG_INFO("[HWMenu] Already initialized");
             return;
         }
 
-        LOG_INFO("[HWTest] === Initializing HandWidget Test Harness ===");
+        LOG_INFO("[HWMenu] === Initializing HandWidget Menu System ===");
 
         // --- Left hand: menu + notifications via multiplexer ---
-        // Each layer gets its own HandWidget because the multiplexer switches
-        // which one is Bind()'d to the UWidgetComponent.
         leftMenuHW_ = std::make_unique<HandWidget>("LeftMenuHW");
         leftNotifHW_ = std::make_unique<HandWidget>("LeftNotifHW");
 
@@ -65,115 +81,485 @@ namespace PortableWidget
 
         rightMux_ = std::make_unique<HandWidgetMultiplexer>("RightHand");
 
-        // --- Build menu pages ---
-        BuildTestMenuPages();
+        // --- Build all menu pages ---
+        BuildMenuPages();
 
         initialized_ = true;
-        LOG_INFO("[HWTest] Initialization complete");
+        LOG_INFO("[HWMenu] Initialization complete");
     }
 
     // =========================================================================
-    // Build test menu pages
+    // Build all menu pages
     // =========================================================================
-    void HandWidgetTestHarness::BuildTestMenuPages()
+    void HandWidgetTestHarness::BuildMenuPages()
     {
         if (!leftMenu_)
             return;
 
-        LOG_INFO("[HWTest] Building test menu pages");
+        LOG_INFO("[HWMenu] Building menu pages");
 
-        // Page 0: Main test menu
-        leftMenu_->RegisterPage(0, "TEST MENU", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
-            items.push_back({"Test Item 1",
-                []() -> std::string { return "OK"; },
-                []() {
-                    LOG_INFO("[HWTest] Test Item 1 selected!");
-                    auto* harness = HandWidgetTestHarness::Get();
-                    if (harness && harness->rightNotif_)
-                    {
-                        harness->rightNotif_->Show(L"Test Item 1 was selected!", 3.0f);
-                    }
-                }
-            });
+        BuildMainPage();
+        BuildCheatsPage();
+        BuildArenaPage();
+        BuildLoadoutsPage();
+        BuildLoadoutSelectPage();
+        BuildSpawnFriendPage();
+        BuildFriendClassPage();
 
-            items.push_back({"Test Item 2 (toggle)",
-                []() -> std::string {
-                    static bool state = false;
-                    return state ? "ON" : "OFF";
-                },
-                []() {
-                    static bool state = false;
-                    state = !state;
-                    LOG_INFO("[HWTest] Test Item 2 toggled to " << (state ? "ON" : "OFF"));
-                }
-            });
+        LOG_INFO("[HWMenu] Menu pages built (7 pages)");
+    }
 
-            items.push_back({"Sub-menu >",
+    // =========================================================================
+    // MAIN PAGE
+    // =========================================================================
+    void HandWidgetTestHarness::BuildMainPage()
+    {
+        leftMenu_->RegisterPage(kPageMain, "MOD MENU", [this](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"Cheats >",
                 []() -> std::string { return ""; },
-                [&menu]() { menu.NavigateToPage(1); },
+                [&menu]() { menu.NavigateToPage(kPageCheats); },
                 true
             });
 
-            items.push_back({"Notif on Left Hand",
-                []() -> std::string { return ""; },
-                []() {
-                    auto* harness = HandWidgetTestHarness::Get();
-                    if (harness && harness->leftNotif_)
-                    {
-                        harness->leftNotif_->Enqueue({L"Notification from menu!", 3.0f, L"MENU NOTIF", 0});
-                    }
+            items.push_back({"Arena Quick Start",
+                []() -> std::string {
+                    auto* a = Arena::ArenaSubsystem::Get();
+                    return (a && a->IsActive()) ? "ACTIVE" : "";
+                },
+                [this]() {
+                    auto* a = Arena::ArenaSubsystem::Get();
+                    if (!a) return;
+                    if (a->IsActive())
+                        a->Stop();
+                    else
+                        a->Start(arenaEnemyCount_, 15.0f);
                 }
             });
 
-            items.push_back({"Notif on Right Hand",
-                []() -> std::string { return ""; },
+            items.push_back({"Quick Spawn Friend",
+                []() -> std::string {
+                    auto* f = Mod::Friend::FriendSubsystem::Get();
+                    return f ? std::to_string(f->ActiveFriendCount()) : "";
+                },
                 []() {
-                    auto* harness = HandWidgetTestHarness::Get();
-                    if (harness && harness->rightNotif_)
-                    {
-                        harness->rightNotif_->Show(L"Hello from the right hand!", 3.0f);
-                    }
+                    auto* f = Mod::Friend::FriendSubsystem::Get();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (f && w) f->SpawnFriend(w);
                 }
             });
 
-            items.push_back({"Close Menu",
+            items.push_back({"Loadouts >",
                 []() -> std::string { return ""; },
-                [&menu]() { menu.Close(); }
+                [&menu]() { menu.NavigateToPage(kPageLoadouts); },
+                true
+            });
+
+            items.push_back({"Arena Config >",
+                [this]() -> std::string {
+                    return std::to_string(arenaEnemyCount_) + " enemies";
+                },
+                [&menu]() { menu.NavigateToPage(kPageArena); },
+                true
+            });
+
+            items.push_back({"Spawn Friend >",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.NavigateToPage(kPageSpawnFriend); },
+                true
+            });
+
+            items.push_back({"Spawn Heal Item",
+                []() -> std::string { return ""; },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (c && w) c->SpawnHealItem(w);
+                }
             });
         });
+    }
 
-        // Page 1: Sub-menu for testing navigation
-        leftMenu_->RegisterPage(1, "SUB-MENU", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+    // =========================================================================
+    // CHEATS PAGE
+    // =========================================================================
+    void HandWidgetTestHarness::BuildCheatsPage()
+    {
+        leftMenu_->RegisterPage(kPageCheats, "CHEATS", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
             items.push_back({"< Back",
                 []() -> std::string { return ""; },
                 [&menu]() { menu.GoBack(); }
             });
 
-            items.push_back({"Sub Item A",
-                []() -> std::string { return "A"; },
-                []() { LOG_INFO("[HWTest] Sub Item A selected"); }
-            });
-
-            items.push_back({"Sub Item B",
-                []() -> std::string { return "B"; },
-                []() { LOG_INFO("[HWTest] Sub Item B selected"); }
-            });
-
-            items.push_back({"Sub Item C (queues 3 notifs)",
-                []() -> std::string { return "C"; },
+            items.push_back({"Combo Bypass",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    bool comboActive = c && c->IsAutoMagActive() && c->IsDurabilityBypassActive() && c->IsFatigueDisabledActive();
+                    return comboActive ? "ON" : "OFF";
+                },
                 []() {
-                    auto* harness = HandWidgetTestHarness::Get();
-                    if (harness && harness->rightNotif_)
-                    {
-                        harness->rightNotif_->Enqueue({L"Notification 1 of 3", 2.0f, L"QUEUE", 0});
-                        harness->rightNotif_->Enqueue({L"Notification 2 of 3", 2.0f, L"QUEUE", 0});
-                        harness->rightNotif_->Enqueue({L"Notification 3 of 3", 2.0f, L"QUEUE", 0});
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) {
+                        c->SetAutoMag(true);
+                        c->ToggleDurabilityBypass();
+                        c->ToggleFatigueDisabled();
                     }
                 }
             });
-        });
 
-        LOG_INFO("[HWTest] Menu pages built");
+            items.push_back({"No Anomalies",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsAnomaliesDisabledActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleAnomaliesDisabled();
+                }
+            });
+
+            items.push_back({"Durability Bypass",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsDurabilityBypassActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleDurabilityBypass();
+                }
+            });
+
+            items.push_back({"God Mode",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsGodModeActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleGodMode();
+                }
+            });
+
+            items.push_back({"Unlimited Ammo",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsUnlimitedAmmoActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleUnlimitedAmmo();
+                }
+            });
+
+            items.push_back({"No Hunger",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsHungerDisabledActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleHungerDisabled();
+                }
+            });
+
+            items.push_back({"No Fatigue",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsFatigueDisabledActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleFatigueDisabled();
+                }
+            });
+
+            items.push_back({"Bullet Time",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsBulletTimeActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleBulletTime();
+                }
+            });
+
+            items.push_back({"No Clip",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsNoClipActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleNoClip();
+                }
+            });
+
+            items.push_back({"Auto Mag",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c && c->IsAutoMagActive() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->ToggleAutoMag();
+                }
+            });
+
+            items.push_back({"Light Intensity x2.0",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c ? std::to_string(c->GetPortableLightIntensityScale()) : "1.0";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->SetPortableLightIntensityScale(2.0f);
+                }
+            });
+
+            items.push_back({"Light Intensity x0.5",
+                []() -> std::string {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    return c ? std::to_string(c->GetPortableLightIntensityScale()) : "1.0";
+                },
+                []() {
+                    Mod::Cheats* c = Mod::GetCheats();
+                    if (c) c->SetPortableLightIntensityScale(0.5f);
+                }
+            });
+        });
+    }
+
+    // =========================================================================
+    // ARENA PAGE
+    // =========================================================================
+    void HandWidgetTestHarness::BuildArenaPage()
+    {
+        leftMenu_->RegisterPage(kPageArena, "ARENA CONFIG", [this](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            items.push_back({"Toggle Arena",
+                []() -> std::string {
+                    auto* a = Arena::ArenaSubsystem::Get();
+                    return (a && a->IsActive()) ? "ACTIVE" : "STOPPED";
+                },
+                [this]() {
+                    auto* a = Arena::ArenaSubsystem::Get();
+                    if (!a) return;
+                    if (a->IsActive())
+                        a->Stop();
+                    else
+                        a->Start(arenaEnemyCount_, 15.0f);
+                }
+            });
+
+            items.push_back({"Enemies: +",
+                [this]() -> std::string { return std::to_string(arenaEnemyCount_); },
+                [this]() { arenaEnemyCount_ = (std::min)(200, arenaEnemyCount_ + 5); }
+            });
+
+            items.push_back({"Enemies: -",
+                [this]() -> std::string { return std::to_string(arenaEnemyCount_); },
+                [this]() { arenaEnemyCount_ = (std::max)(1, arenaEnemyCount_ - 5); }
+            });
+
+            items.push_back({"Waves: +",
+                [this]() -> std::string { return std::to_string(arenaWaveCount_); },
+                [this]() { arenaWaveCount_ = (std::min)(100, arenaWaveCount_ + 1); }
+            });
+
+            items.push_back({"Waves: -",
+                [this]() -> std::string { return std::to_string(arenaWaveCount_); },
+                [this]() { arenaWaveCount_ = (std::max)(1, arenaWaveCount_ - 1); }
+            });
+        });
+    }
+
+    // =========================================================================
+    // LOADOUTS PAGE
+    // =========================================================================
+    void HandWidgetTestHarness::BuildLoadoutsPage()
+    {
+        leftMenu_->RegisterPage(kPageLoadouts, "LOADOUTS", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            items.push_back({"Capture Loadout",
+                []() -> std::string { return ""; },
+                []() {
+                    auto* ls = Mod::Loadout::LoadoutSubsystem::Get();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (ls && w) ls->CaptureLoadout(w, "quick_capture");
+                }
+            });
+
+            items.push_back({"Select Loadout >",
+                []() -> std::string {
+                    auto* ls = Mod::Loadout::LoadoutSubsystem::Get();
+                    return ls ? ls->GetSelectedLoadout() : "";
+                },
+                [&menu]() { menu.NavigateToPage(kPageLoadoutSelect); },
+                true
+            });
+
+            items.push_back({"Apply Selected",
+                []() -> std::string {
+                    auto* ls = Mod::Loadout::LoadoutSubsystem::Get();
+                    return ls ? ls->GetSelectedLoadout() : "";
+                },
+                []() {
+                    auto* ls = Mod::Loadout::LoadoutSubsystem::Get();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (ls && w) {
+                        std::string selected = ls->GetSelectedLoadout();
+                        if (!selected.empty())
+                            ls->ApplyLoadout(w, selected);
+                    }
+                }
+            });
+
+            items.push_back({"Clear Equipment",
+                []() -> std::string { return ""; },
+                []() {
+                    auto* ls = Mod::Loadout::LoadoutSubsystem::Get();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (ls && w) ls->ClearPlayerLoadout(w);
+                }
+            });
+        });
+    }
+
+    // =========================================================================
+    // LOADOUT SELECT PAGE (dynamic list of .loadout files)
+    // =========================================================================
+    void HandWidgetTestHarness::BuildLoadoutSelectPage()
+    {
+        leftMenu_->RegisterPage(kPageLoadoutSelect, "SELECT LOADOUT", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            auto* ls = Mod::Loadout::LoadoutSubsystem::Get();
+            if (!ls) return;
+
+            std::string loadoutList = ls->ListLoadouts();
+            std::istringstream iss(loadoutList);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (line.size() > 2 && line[0] == '-' && line[1] == ' ')
+                    line = line.substr(2);
+                while (!line.empty() && (line.back() == ' ' || line.back() == '\r' || line.back() == '\n'))
+                    line.pop_back();
+                while (!line.empty() && line.front() == ' ')
+                    line = line.substr(1);
+
+                if (line.empty()) continue;
+
+                std::string loadoutName = line;
+                items.push_back({loadoutName,
+                    [loadoutName]() -> std::string {
+                        auto* ls2 = Mod::Loadout::LoadoutSubsystem::Get();
+                        if (ls2 && ls2->GetSelectedLoadout() == loadoutName)
+                            return "SELECTED";
+                        return "";
+                    },
+                    [loadoutName]() {
+                        auto* ls2 = Mod::Loadout::LoadoutSubsystem::Get();
+                        if (ls2) ls2->SetSelectedLoadout(loadoutName);
+                    }
+                });
+            }
+        });
+    }
+
+    // =========================================================================
+    // SPAWN FRIEND PAGE
+    // =========================================================================
+    void HandWidgetTestHarness::BuildSpawnFriendPage()
+    {
+        leftMenu_->RegisterPage(kPageSpawnFriend, "SPAWN FRIEND", [this](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            items.push_back({"Spawn Friend",
+                []() -> std::string {
+                    auto* f = Mod::Friend::FriendSubsystem::Get();
+                    return f ? std::to_string(f->ActiveFriendCount()) + " active" : "";
+                },
+                []() {
+                    auto* f = Mod::Friend::FriendSubsystem::Get();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (f && w) f->SpawnFriend(w);
+                }
+            });
+
+            items.push_back({"Select Class >",
+                [this]() -> std::string {
+                    return selectedFriendClass_.empty() ? "Random" : selectedFriendClass_;
+                },
+                [&menu]() { menu.NavigateToPage(kPageFriendClass); },
+                true
+            });
+
+            items.push_back({"Clear All Friends",
+                []() -> std::string { return ""; },
+                []() {
+                    auto* f = Mod::Friend::FriendSubsystem::Get();
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (f && w) f->ClearAll(w);
+                }
+            });
+        });
+    }
+
+    // =========================================================================
+    // FRIEND CLASS PAGE (dynamic list of discovered NPC classes)
+    // =========================================================================
+    void HandWidgetTestHarness::BuildFriendClassPage()
+    {
+        leftMenu_->RegisterPage(kPageFriendClass, "SELECT CLASS", [this](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            items.push_back({"Random",
+                [this]() -> std::string {
+                    return selectedFriendClass_.empty() ? "SELECTED" : "";
+                },
+                [this]() { selectedFriendClass_ = ""; }
+            });
+
+            auto* arena = Arena::ArenaSubsystem::Get();
+            if (!arena) return;
+
+            const auto& npcs = arena->GetDiscoveredNPCs();
+            for (const auto& npcClass : npcs) {
+                std::string shortName = npcClass;
+                size_t lastSlash = shortName.rfind('/');
+                if (lastSlash != std::string::npos)
+                    shortName = shortName.substr(lastSlash + 1);
+                if (shortName.size() > 3 && shortName.substr(0, 3) == "BP_")
+                    shortName = shortName.substr(3);
+                if (shortName.size() > 2 && shortName.substr(shortName.size() - 2) == "_C")
+                    shortName = shortName.substr(0, shortName.size() - 2);
+
+                std::string fullClass = npcClass;
+                items.push_back({shortName,
+                    [this, fullClass]() -> std::string {
+                        return selectedFriendClass_ == fullClass ? "SELECTED" : "";
+                    },
+                    [this, fullClass]() { selectedFriendClass_ = fullClass; }
+                });
+            }
+        });
     }
 
     // =========================================================================
@@ -184,13 +570,11 @@ namespace PortableWidget
         SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
         if (!player || player->IsDefaultObject())
         {
-            // Player not available yet
             if (leftBound_ || rightBound_)
             {
-                LOG_INFO("[HWTest] Player lost, unbinding all");
+                LOG_INFO("[HWMenu] Player lost, unbinding all");
                 leftBound_ = false;
                 rightBound_ = false;
-                // Don't destroy widgets here — they'll be re-validated on next bind
             }
             return;
         }
@@ -199,17 +583,14 @@ namespace PortableWidget
         SDK::UWidgetComponent* leftComp = player->W_GripDebug_L;
         if (leftComp && !leftBound_)
         {
-            LOG_INFO("[HWTest] Binding left hand to W_GripDebug_L");
+            LOG_INFO("[HWMenu] Binding left hand to W_GripDebug_L");
 
-            // The multiplexer manages binding layers to the component
             leftMux_->Bind(leftComp);
 
-            // Set up menu layer
             auto& menuLayer = leftMux_->AddLayer("Menu", LayerPriority::Menu);
             menuLayer.handWidget = leftMenuHW_.get();
             menuLayer.isActiveQuery = [this]() { return leftMenu_ && leftMenu_->IsOpen(); };
 
-            // Set up notification layer on left hand
             auto& leftNotifLayer = leftMux_->AddLayer("Notification", LayerPriority::Notification);
             leftNotifLayer.handWidget = leftNotifHW_.get();
             leftNotifLayer.isActiveQuery = [this]() {
@@ -226,18 +607,16 @@ namespace PortableWidget
         SDK::UWidgetComponent* rightComp = player->W_GripDebug_R;
         if (rightComp && !rightBound_)
         {
-            LOG_INFO("[HWTest] Binding right hand to W_GripDebug_R");
+            LOG_INFO("[HWMenu] Binding right hand to W_GripDebug_R");
 
             rightMux_->Bind(rightComp);
 
-            // Set up notification layer
             auto& notifLayer = rightMux_->AddLayer("Notification", LayerPriority::Notification);
             notifLayer.handWidget = rightNotifHW_.get();
             notifLayer.isActiveQuery = [this]() {
                 return rightNotif_ && (rightNotif_->IsShowing() || rightNotif_->HasQueued());
             };
 
-            // Bind the HandWidget to the component
             rightNotifHW_->Bind(rightComp);
 
             rightBound_ = true;
@@ -255,31 +634,69 @@ namespace PortableWidget
         if (!world)
             return;
 
-        // Ensure bindings are valid
         EnsureBindings(world);
 
         SDK::APlayerController* pc = SDK::UGameplayStatics::GetPlayerController(world, 0);
 
-        // Tick multiplexers
         if (leftMux_ && leftBound_)
             leftMux_->Tick(world, pc);
         if (rightMux_ && rightBound_)
             rightMux_->Tick(world, pc);
 
-        // Tick notifications
         if (rightNotif_ && rightBound_)
             rightNotif_->Tick(world, pc);
         if (leftNotif_ && leftBound_)
             leftNotif_->Tick(world, pc);
 
-        // Tick menu render (if open)
         if (leftMenu_ && leftMenu_->IsOpen() && leftBound_)
             leftMenu_->Render(world, pc);
     }
 
     // =========================================================================
+    // Public notification API (replaces ModFeedback::ShowOnRightWidget)
+    // =========================================================================
+    void HandWidgetTestHarness::ShowNotification(const std::wstring& text, float durationSeconds)
+    {
+        if (rightNotif_)
+        {
+            rightNotif_->Show(text, durationSeconds);
+        }
+        else
+        {
+            LOG_WARN("[HWMenu] ShowNotification called but rightNotif_ is null");
+        }
+    }
+
+    void HandWidgetTestHarness::ShowNotificationWithTitle(const std::wstring& title, const std::wstring& text, float durationSeconds)
+    {
+        if (rightNotif_)
+        {
+            rightNotif_->ShowWithTitle(title, text, durationSeconds);
+        }
+        else
+        {
+            LOG_WARN("[HWMenu] ShowNotificationWithTitle called but rightNotif_ is null");
+        }
+    }
+
+    // =========================================================================
     // Input routing
     // =========================================================================
+    void HandWidgetTestHarness::OnGripPressed()
+    {
+        gripHeld_.store(true, std::memory_order_relaxed);
+    }
+
+    void HandWidgetTestHarness::OnGripReleased()
+    {
+        gripHeld_.store(false, std::memory_order_relaxed);
+    }
+
+    bool HandWidgetTestHarness::IsGripHeld() const
+    {
+        return gripHeld_.load(std::memory_order_relaxed);
+    }
+
     bool HandWidgetTestHarness::OnToggleMenu(SDK::UWorld* world)
     {
         if (!initialized_ || !leftMenu_ || !leftBound_)
@@ -288,9 +705,9 @@ namespace PortableWidget
         SDK::APlayerController* pc = world ? SDK::UGameplayStatics::GetPlayerController(world, 0) : nullptr;
         bool nowOpen = leftMenu_->Toggle(world, pc);
 
-        LOG_INFO("[HWTest] OnToggleMenu: " << (nowOpen ? "OPENED" : "CLOSED"));
+        LOG_INFO("[HWMenu] OnToggleMenu: " << (nowOpen ? "OPENED" : "CLOSED"));
 
-        return true; // always consume when we handle it
+        return true;
     }
 
     bool HandWidgetTestHarness::OnNavigate(float thumbstickY)
@@ -339,7 +756,7 @@ namespace PortableWidget
             return HandleTestCommand(world, args);
         });
 
-        LOG_INFO("[HWTest] TCP commands registered (hwtest)");
+        LOG_INFO("[HWMenu] TCP commands registered (hwtest)");
     }
 
     std::string HandWidgetTestHarness::HandleTestCommand(SDK::UWorld* world, const std::vector<std::string>& args)
@@ -372,13 +789,8 @@ namespace PortableWidget
             }
 
             std::wstring wtext(text.begin(), text.end());
-
-            if (rightNotif_)
-            {
-                rightNotif_->Show(wtext, 5.0f);
-                return "Notification shown on right hand: " + text;
-            }
-            return "ERROR: rightNotif_ is null";
+            ShowNotification(wtext, 5.0f);
+            return "Notification shown on right hand: " + text;
         }
 
         if (subcmd == "notif_left")
@@ -450,15 +862,19 @@ namespace PortableWidget
         if (subcmd == "status")
         {
             std::ostringstream oss;
-            oss << "HandWidget Test Harness Status:\n";
+            oss << "HandWidget Menu System Status:\n";
             oss << "  initialized: " << (initialized_ ? "yes" : "no") << "\n";
             oss << "  leftBound: " << (leftBound_ ? "yes" : "no") << "\n";
             oss << "  rightBound: " << (rightBound_ ? "yes" : "no") << "\n";
+            oss << "  gripHeld: " << (gripHeld_.load() ? "yes" : "no") << "\n";
             oss << "  leftMenu open: " << (leftMenu_ && leftMenu_->IsOpen() ? "yes" : "no") << "\n";
             oss << "  rightNotif showing: " << (rightNotif_ && rightNotif_->IsShowing() ? "yes" : "no") << "\n";
             oss << "  rightNotif queued: " << (rightNotif_ && rightNotif_->HasQueued() ? "yes" : "no") << "\n";
             oss << "  leftMux active: " << (leftMux_ ? leftMux_->GetActiveLayerName() : "null") << "\n";
             oss << "  rightMux active: " << (rightMux_ ? rightMux_->GetActiveLayerName() : "null") << "\n";
+            oss << "  arenaEnemies: " << arenaEnemyCount_ << "\n";
+            oss << "  arenaWaves: " << arenaWaveCount_ << "\n";
+            oss << "  friendClass: " << (selectedFriendClass_.empty() ? "Random" : selectedFriendClass_) << "\n";
             return oss.str();
         }
 
@@ -479,7 +895,7 @@ namespace PortableWidget
     // =========================================================================
     void HandWidgetTestHarness::Shutdown()
     {
-        LOG_INFO("[HWTest] Shutting down");
+        LOG_INFO("[HWMenu] Shutting down");
 
         if (leftMenu_) leftMenu_->Close();
         if (leftNotif_) leftNotif_->ClearAll();
@@ -498,7 +914,7 @@ namespace PortableWidget
         rightBound_ = false;
         initialized_ = false;
 
-        LOG_INFO("[HWTest] Shutdown complete");
+        LOG_INFO("[HWMenu] Shutdown complete");
     }
 
 } // namespace PortableWidget

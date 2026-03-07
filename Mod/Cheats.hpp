@@ -244,4 +244,7 @@ namespace Mod
         void UpdateEnvironmentPrune(SDK::UWorld* world, SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player);
         void ExecuteDueEnvironmentPruneBatches();
     };
+
+    // Global accessor for the singleton Cheats instance (defined in CommandHandler.cpp).
+    Cheats* GetCheats();
 }

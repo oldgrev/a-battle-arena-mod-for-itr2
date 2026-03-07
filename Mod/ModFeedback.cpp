@@ -22,6 +22,7 @@ Subtitle system (ShowSubtitles): kept as-is, routes through player character's H
 #include "Logging.hpp"
 #include "ModTuning.hpp"
 #include "SpatialAudio.hpp"
+#include "HandWidgetTestHarness.hpp"
 
 #include <Windows.h>
 
@@ -315,275 +316,6 @@ namespace Mod::ModFeedback
             SpatialAudio::Tick();
         }
 
-        // -----------------------------------------------------------------
-        // Right-hand widget display — replaces ShowSubtitles as primary output
-        // Uses W_GripDebug_R with a WBP_Confirmation widget, exactly like VRMenuSubsystem
-        // uses W_GripDebug_L for the mod menu.
-        // -----------------------------------------------------------------
-
-        static SDK::UWBP_Confirmation_C* gRightWidget = nullptr;  // owned by UE GC
-        static uint64_t gRightWidgetExpiryMs = 0;                 // 0 = no active message
-        static SDK::ABP_RadiusPlayerCharacter_Gameplay_C* gRightWidgetOwnerPlayer = nullptr; // track which player owns the widget
-        static int gRHLogCount = 0;
-        constexpr int kRHLogLimit = 500;  // extensive logging for debugging
-
-        // Helper: check if a UObject is still valid (not GC'd/pending kill)
-        static bool IsWidgetValid(const SDK::UObject* obj)
-        {
-            if (!obj) return false;
-            return SDK::UKismetSystemLibrary::IsValid(obj);
-        }
-
-        // Lazily create and attach the WBP_Confirmation widget to W_GripDebug_R.
-        // Returns true if gRightWidget is ready to use.
-        static bool EnsureRightHandWidget()
-        {
-            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
-            if (!player || player->IsDefaultObject())
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] EnsureRightHandWidget: no valid player (player=" << (player ? "CDO" : "null") << ")");
-                gRightWidget = nullptr;
-                gRightWidgetOwnerPlayer = nullptr;
-                return false;
-            }
-
-            SDK::UWidgetComponent* comp = player->W_GripDebug_R;
-            if (!comp)
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] EnsureRightHandWidget: W_GripDebug_R is null on player");
-                gRightWidget = nullptr;
-                gRightWidgetOwnerPlayer = nullptr;
-                return false;
-            }
-
-            // Check if cached widget is still valid AND belongs to current player
-            if (gRightWidget && gRightWidgetOwnerPlayer == player && IsWidgetValid(gRightWidget))
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_INFO("[ModFeedback][RH] EnsureRightHandWidget: cached widget still valid");
-                return true;
-            }
-
-            // Widget invalid, stale, or belongs to different player - need to recreate
-            if (gRightWidget)
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_INFO("[ModFeedback][RH] EnsureRightHandWidget: cached widget invalid/stale, recreating (owner=" 
-                        << (gRightWidgetOwnerPlayer == player ? "same" : "different") 
-                        << " valid=" << (IsWidgetValid(gRightWidget) ? "yes" : "no") << ")");
-                gRightWidget = nullptr;
-                gRightWidgetOwnerPlayer = nullptr;
-            }
-
-            SDK::UWorld* world = Mod::GameContext::GetWorld();
-            if (!world) return false;
-
-            SDK::APlayerController* pc = SDK::UGameplayStatics::GetPlayerController(world, 0);
-            if (!pc) return false;
-
-            SDK::UClass* widgetClass = SDK::UWBP_Confirmation_C::StaticClass();
-            if (!widgetClass)
-            {
-                LOG_WARN("[ModFeedback][RH] WBP_Confirmation_C class not found");
-                return false;
-            }
-
-            SDK::UUserWidget* widget = SDK::UWidgetBlueprintLibrary::Create(world, widgetClass, pc);
-            if (!widget || !widget->IsA(widgetClass))
-            {
-                LOG_WARN("[ModFeedback][RH] Failed to create WBP_Confirmation_C widget");
-                return false;
-            }
-
-            gRightWidget = static_cast<SDK::UWBP_Confirmation_C*>(widget);
-            comp->SetWidget(gRightWidget);
-            comp->SetVisibility(true, true);
-            comp->SetHiddenInGame(false, true);
-            comp->SetTwoSided(true);
-
-            // Fixed draw size suitable for short messages
-            SDK::FVector2D drawSize{ 500.0, 500.0 };
-            comp->SetDrawSize(drawSize);
-
-            // Set static header and hide Yes/No buttons
-            {
-                SDK::FString hdrStr(L"MOD");
-                SDK::FText hdrText = SDK::UKismetTextLibrary::Conv_StringToText(hdrStr);
-                gRightWidget->Title = hdrText;
-                if (gRightWidget->Txt_Confirmation_Title)
-                {
-                    gRightWidget->Txt_Confirmation_Title->SetText(hdrText);
-                    SDK::FSlateColor col;
-                    col.SpecifiedColor = SDK::FLinearColor{0.5f, 0.85f, 1.0f, 1.0f};
-                    gRightWidget->Txt_Confirmation_Title->SetColorAndOpacity(col);
-                }
-                SDK::FString emptyStr(L"");
-                SDK::FText emptyText = SDK::UKismetTextLibrary::Conv_StringToText(emptyStr);
-                gRightWidget->Yes_Text = emptyText;
-                gRightWidget->No_Text = emptyText;
-            }
-
-            // Track ownership so we can detect player changes
-            gRightWidgetOwnerPlayer = player;
-
-            if (gRHLogCount++ < kRHLogLimit)
-                LOG_INFO("[ModFeedback][RH] Right-hand message widget created and attached to W_GripDebug_R");
-            return true;
-        }
-
-        // Display text on W_GripDebug_R for the given duration.
-        // Returns true if the widget rendered the message (false = widget not available).
-        static bool ShowOnRightWidget(const wchar_t* text, float seconds)
-        {
-            if (gRHLogCount++ < kRHLogLimit)
-                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget called: text_len=" << (text ? wcslen(text) : 0) << " seconds=" << seconds);
-
-            if (!EnsureRightHandWidget())
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: EnsureRightHandWidget failed");
-                return false;
-            }
-            
-            if (!gRightWidget)
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: gRightWidget is null after EnsureRightHandWidget succeeded?!");
-                return false;
-            }
-
-            // Re-validate widget hasn't been GC'd between EnsureRightHandWidget and now
-            if (!IsWidgetValid(gRightWidget))
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: widget became invalid (GC'd?)");
-                gRightWidget = nullptr;
-                gRightWidgetOwnerPlayer = nullptr;
-                return false;
-            }
-
-            std::wstring msg(text);
-            SDK::FString msgStr = MakeStableFString(msg);
-            SDK::FText msgText = SDK::UKismetTextLibrary::Conv_StringToText(msgStr);
-
-            // Log what text we're trying to set (truncate for logging)
-            std::wstring logMsg = msg.size() > 50 ? msg.substr(0, 47) + L"..." : msg;
-            if (gRHLogCount++ < kRHLogLimit)
-                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: setting text: \"" << SDK::FString(logMsg.c_str()).ToString() << "\"");
-
-            gRightWidget->Description = msgText;
-            if (gRightWidget->Txt_TextConfirm)
-            {
-                gRightWidget->Txt_TextConfirm->SetText(msgText);
-                
-                // Force text block to recognize the update
-                // Try multiple approaches since UE widget updates can be finicky
-                // Approach 1: Modify style to trigger a visual update
-                SDK::FTextBlockStyle style = gRightWidget->Txt_TextConfirm->WidgetStyle;
-                style.ColorAndOpacity.SpecifiedColor = SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f};
-                gRightWidget->Txt_TextConfirm->SetWidgetStyle(style);
-                
-                // Approach 2: Force invalidation via render opacity (always valid)
-                gRightWidget->Txt_TextConfirm->SetRenderOpacity(1.0f);
-                
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: text set on Txt_TextConfirm");
-            }
-            else
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: Txt_TextConfirm is null, text set only on Description");
-            }
-
-            gRightWidgetExpiryMs = NowTickMs() + static_cast<uint64_t>(seconds * 1000.0f);
-
-            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
-            if (!player)
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: player became null after text set");
-                return false;
-            }
-
-            SDK::UWidgetComponent* comp = player->W_GripDebug_R;
-            if (!comp)
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] ShowOnRightWidget: W_GripDebug_R is null on player");
-                return false;
-            }
-
-            // CRITICAL FIX: Always ensure visibility is ON before showing a message
-            // TickRightWidget() hides the component when message expires, so we must re-enable it here
-            bool wasHidden = !comp->IsVisible();
-            comp->SetVisibility(true, true);
-            comp->SetHiddenInGame(false, true);
-            
-            // FIX FOR STUCK TEXT: Re-set the widget on the component to force a full refresh
-            // This ensures the widget component picks up the new text content
-            if (gRHLogCount++ < kRHLogLimit)
-                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: re-setting widget on component to force update");
-            comp->SetWidget(nullptr);
-            comp->SetWidget(gRightWidget);
-            
-            comp->RequestRedraw();
-
-            if (gRHLogCount++ < kRHLogLimit)
-                LOG_INFO("[ModFeedback][RH] ShowOnRightWidget: success (wasHidden=" << (wasHidden ? "yes" : "no") 
-                    << " expiryMs=" << gRightWidgetExpiryMs << ")");
-
-            return true;
-        }
-
-        // Called every tick. Clears the right-hand widget text once the message duration expires.
-        static void TickRightWidget()
-        {
-            // First, check if widget is still valid
-            if (gRightWidget && !IsWidgetValid(gRightWidget))
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_INFO("[ModFeedback][RH] TickRightWidget: cached widget became invalid (GC'd), clearing");
-                gRightWidget = nullptr;
-                gRightWidgetOwnerPlayer = nullptr;
-                gRightWidgetExpiryMs = 0;
-                return;
-            }
-
-            if (!gRightWidget || gRightWidgetExpiryMs == 0)
-                return;
-            if (NowTickMs() < gRightWidgetExpiryMs)
-                return;
-
-            if (gRHLogCount++ < kRHLogLimit)
-                LOG_INFO("[ModFeedback][RH] TickRightWidget: message expired, clearing text and hiding widget");
-
-            gRightWidgetExpiryMs = 0;
-
-            SDK::FString emptyStr(L"");
-            SDK::FText emptyText = SDK::UKismetTextLibrary::Conv_StringToText(emptyStr);
-            gRightWidget->Description = emptyText;
-            if (gRightWidget->Txt_TextConfirm)
-                gRightWidget->Txt_TextConfirm->SetText(emptyText);
-
-            SDK::ABP_RadiusPlayerCharacter_Gameplay_C* player = Mod::GameContext::GetPlayerCharacter();
-            if (player && player->W_GripDebug_R)
-            {
-                player->W_GripDebug_R->SetVisibility(false, true);
-                player->W_GripDebug_R->RequestRedraw();
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_INFO("[ModFeedback][RH] TickRightWidget: component hidden");
-            }
-            else
-            {
-                if (gRHLogCount++ < kRHLogLimit)
-                    LOG_WARN("[ModFeedback][RH] TickRightWidget: could not hide component (player=" 
-                        << (player ? "valid" : "null") << " comp=" 
-                        << (player && player->W_GripDebug_R ? "valid" : "null") << ")");
-            }
-        }
-
         // Register a 3D sound handle as tracked against an actor for position updates.
         static void TrackActorSound(SDK::AActor* actor, SpatialAudio::SoundHandle handle, const std::string& descriptor)
         {
@@ -855,15 +587,20 @@ namespace Mod::ModFeedback
             msgText = SDK::UKismetTextLibrary::Conv_StringToText(stable);
         }
 
-        // --- Primary: right-hand widget --- //
+        // --- Primary: HandWidget notification on right hand --- //
         bool wroteToWidget = false;
         try
         {
-            wroteToWidget = ShowOnRightWidget(msgW.c_str(), duration);
+            auto* hw = PortableWidget::HandWidgetTestHarness::Get();
+            if (hw)
+            {
+                hw->ShowNotification(msgW, duration);
+                wroteToWidget = true;
+            }
         }
         catch (...)
         {
-            LOG_WARN("[ModFeedback] Exception in ShowOnRightWidget; falling back to ShowSubtitles");
+            LOG_WARN("[ModFeedback] Exception in HandWidget ShowNotification; falling back to ShowSubtitles");
         }
         
 
@@ -872,7 +609,7 @@ namespace Mod::ModFeedback
         {
             ++showLogs;
             if (wroteToWidget)
-                LOG_INFO("[ModFeedback] ShowOnRightWidget dur=" << duration << " chars=" << (int)msgW.size());
+                LOG_INFO("[ModFeedback] HandWidget notification dur=" << duration << " chars=" << (int)msgW.size());
             else
                 LOG_INFO("[ModFeedback] ShowSubtitles(fallback) player='" << player->GetFullName() << "' dur=" << duration << " chars=" << (int)msgW.size());
         }
@@ -941,9 +678,6 @@ namespace Mod::ModFeedback
 
         // Update 3D sound positions and clean up stale entries
         UpdateTrackedActorPositions();
-
-        // Expire right-hand widget message if its duration has elapsed
-        TickRightWidget();
 
         if (ShouldSuppressSubtitlesNow())
         {
@@ -1576,13 +1310,4 @@ namespace Mod::ModFeedback
         }
     }
 
-    void ClearWidgetCache()
-    {
-        if (gRHLogCount++ < kRHLogLimit)
-            LOG_INFO("[ModFeedback][RH] ClearWidgetCache called - clearing cached widget reference");
-        
-        gRightWidget = nullptr;
-        gRightWidgetOwnerPlayer = nullptr;
-        gRightWidgetExpiryMs = 0;
-    }
 }

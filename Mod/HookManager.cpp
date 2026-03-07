@@ -76,7 +76,7 @@
 #include "CommandQueue.hpp"
 #include "Logging.hpp"
 #include "ArenaSubsystem.hpp"
-#include "VRMenuSubsystem.hpp"
+#include "HandWidgetTestHarness.hpp"
 
 #include "ModFeedback.hpp"
 #include "GameContext.hpp"
@@ -1653,12 +1653,25 @@ namespace Mod
 
             LogInputActionValueBytes("ButtonBY", parms);
 
-            auto* menu = Mod::VRMenuSubsystem::Get();
-            if (!menu)
+            auto* hw = PortableWidget::HandWidgetTestHarness::Get();
+            if (!hw)
                 return false;
 
-            bool suppress = menu->OnButtonBY();
-            return suppress;
+            SDK::UWorld* world = Mod::GameContext::GetWorld();
+
+            // Grip+B/Y = toggle menu
+            if (hw->IsGripHeld())
+            {
+                return hw->OnToggleMenu(world);
+            }
+
+            // B/Y without grip, menu open = select
+            if (hw->IsMenuOpen())
+            {
+                return hw->OnSelect();
+            }
+
+            return false;
         }
 
         // Left grip pressed (IA_Grip_Left)
@@ -1668,9 +1681,9 @@ namespace Mod
             if (!object || !function || !parms)
                 return false;
 
-            auto* menu = Mod::VRMenuSubsystem::Get();
-            if (menu)
-                menu->OnGripPressed();
+            auto* hw = PortableWidget::HandWidgetTestHarness::Get();
+            if (hw)
+                hw->OnGripPressed();
 
             return false;  // Never suppress grip — game needs it for grabbing
         }
@@ -1682,9 +1695,9 @@ namespace Mod
             if (!object || !function || !parms)
                 return false;
 
-            auto* menu = Mod::VRMenuSubsystem::Get();
-            if (menu)
-                menu->OnGripReleased();
+            auto* hw = PortableWidget::HandWidgetTestHarness::Get();
+            if (hw)
+                hw->OnGripReleased();
 
             return false;  // Never suppress ungrip
         }
@@ -1711,8 +1724,8 @@ namespace Mod
             if (!object || !function || !parms)
                 return false;
 
-            auto* menu = Mod::VRMenuSubsystem::Get();
-            if (!menu || !menu->IsMenuOpen())
+            auto* hw = PortableWidget::HandWidgetTestHarness::Get();
+            if (!hw || !hw->IsMenuOpen())
                 return false;  // Menu closed — let game handle movement normally
 
             // Log raw bytes for one-time layout verification
@@ -1723,19 +1736,7 @@ namespace Mod
             const double axisX = axisDoubles[0];  // left/right (strafe) — ignore for vertical nav
             const double axisY = axisDoubles[1];  // forward/backward — use as vertical nav axis
 
-            // // Throttled logging so every event is traceable without flooding
-            // {
-            //     static auto lastNavLog = std::chrono::steady_clock::time_point{};
-            //     auto now = std::chrono::steady_clock::now();
-            //     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastNavLog).count() > 100)
-            //     {
-            //         lastNavLog = now;
-            //         LOG_INFO("[VRMenu:Nav] X(strafe)=" << axisX << " Y(fwd)=" << axisY
-            //                  << " -> thumbstickY=" << axisY);
-            //     }
-            // }
-
-            menu->OnNavigate(static_cast<float>(axisY));
+            hw->OnNavigate(static_cast<float>(axisY));
 
             return true;  // SUPPRESS game movement while menu is open
         }

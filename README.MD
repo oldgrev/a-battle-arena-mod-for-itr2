@@ -6,7 +6,11 @@ I hoard, I make sure I have a lot of ammo and a lot of healing items before I go
 
 So I end up fumbling reloads, and lack familiarity with the weapons, but sometimes i just want to have a bit of fun with the combat ai instead of the game's short ambushes every so often. i want to get better at accuracy and knowing how many shots are left, and knowing weapon accuracy and enemy behaviours etc, which I think answers the 'why?'.
 
+<div style="text-align: center;">
+
 ![menu and stuff](./docs/menuconcept.gif)
+
+</div>
 
 # notes
 

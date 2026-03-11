@@ -383,9 +383,9 @@ namespace PortableWidget
         SDK::FVector2D size{static_cast<double>(width), static_cast<double>(height)};
         component_->SetDrawSize(size);
 
-        std::ostringstream oss;
-        oss << "SetDrawSize: " << width << "x" << height;
-        Log("INFO", oss.str());
+        // std::ostringstream oss;
+        // oss << "SetDrawSize: " << width << "x" << height;
+        // Log("INFO", oss.str());
     }
 
     void HandWidget::SetPivot(float x, float y)

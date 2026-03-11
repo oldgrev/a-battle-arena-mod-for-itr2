@@ -34,6 +34,7 @@ The root menu provides quick access to common actions and sub-menus:
   Cheats            [→]
   Loadouts          [→]
   Friend            [→]
+  NVG               [→]
 ```
 
 Items marked with `[→]` navigate to sub-menus.
@@ -104,6 +105,32 @@ Friend NPC management:
   Status
   ← Back
 ```
+
+### NVG Menu
+
+Night vision goggle controls (all parameters adjustable in VR):
+
+```
+[NVG]
+> ← Back
+  Toggle NVG        [ON/OFF]
+  Mode: Fullscreen   [cycle: Fullscreen | LensBlackout | LensOverlay | GameNVGOnly]
+  Probe NVG         [PENDING|FOUND|NOT_FOUND]
+  Blendables         Dump
+  Intensity +        [value]
+  Intensity -        [value]
+  Grain +            [value]
+  Grain -            [value]
+  Bloom +            [value]
+  Bloom -            [value]
+  Aberration +       [value]
+  Aberration -       [value]
+```
+
+**Probe Status:**
+- PENDING: `nvg_probe` not yet run.
+- FOUND: `MI_PP_NightVision` blendable located at index 4 (weight 0→1 activation detected). Lens modes use direct weight toggle.
+- NOT_FOUND: Probe ran but no weight-activation detected on any blendable. Unexpected state given confirmed mechanism.
 
 ## Visual Indicators
 

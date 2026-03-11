@@ -26,6 +26,7 @@ Solution: add short aliases and a one-shot "vr_diag" command to enable/disable t
 #include "ModTuning.hpp"
 #include "HookManager.hpp"
 #include "FriendSubsystem.hpp"
+#include "NVGSubsystem.hpp"
 
 namespace Mod
 {
@@ -677,6 +678,537 @@ namespace Mod
 
 
 
+
+        // ===================================================================
+        // Night Vision Goggle commands
+        // ===================================================================
+
+        // nvg - Toggle NVG on/off
+        Register("nvg", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            (void)args;
+            Mod::NVGSubsystem::Get().Toggle();
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_on / nvg_off - Explicit on/off
+        Register("nvg_on", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            Mod::NVGSubsystem::Get().SetEnabled(true);
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        Register("nvg_off", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            Mod::NVGSubsystem::Get().SetEnabled(false);
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_mode <0|1|2|3|4> - Set NVG display mode
+        //   0 = Fullscreen (camera PP both eyes)
+        //   1 = LensBlackout (camera PP + MI_PP_NightVision weight toggle)
+        //   2 = LensOverlay (mesh-based NVG lens, normal view outside)
+        //   3 = LensMeshBlackout (mesh-based NVG lens, blacked out outside)
+        //   4 = GameNVGOnly (pure SetNV delegation, no camera PP — isolated stereo test)
+        Register("nvg_mode", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_mode <0=Fullscreen|1=LensBlackout|2=LensOverlay|3=LensMeshBlackout|4=GameNVGOnly>\nCurrent: " + Mod::NVGSubsystem::Get().GetStatus();
+
+            int modeInt = 0;
+            try { modeInt = std::stoi(args[0]); }
+            catch (...) { return "Invalid mode: " + args[0]; }
+
+            Mod::NVGSubsystem::Get().SetMode(static_cast<Mod::NVGMode>(modeInt));
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // ---------------------------------------------------------------
+        // Disabled diagnostic commands (kept for reference, not registered)
+        // To re-enable, uncomment the Register() calls below.
+        // ---------------------------------------------------------------
+        /*
+        // nvg_probe - Discover the game's NVG blendable material by calling SetNV
+        Register("nvg_probe", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().ProbeGameNVG(world); });
+
+        // nvg_pp_element <index> <0|1> - Directly call SwitchPPElement for experimentation
+        Register("nvg_pp_element", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (args.size() < 2)
+                return "Usage: nvg_pp_element <index> <0=off|1=on>";
+            int index = 0;
+            int onOff = 0;
+            try { index = std::stoi(args[0]); onOff = std::stoi(args[1]); }
+            catch (...) { return "Invalid args"; }
+            return Mod::NVGSubsystem::Get().ProbePPElement(world, index, onOff != 0); });
+
+        // nvg_blendables - Dump current camera WeightedBlendables
+        Register("nvg_blendables", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().DumpBlendables(world); });
+
+        // nvg_game_on / nvg_game_off - Direct SetNV wrappers, bypass mod camera PP
+        Register("nvg_game_on", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().EnableGameNVGDirect(world); });
+
+        Register("nvg_game_off", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().DisableGameNVGDirect(world); });
+
+        // nvg_dump_mat_params - Dump all scalar/vector/texture params of MI_PP_NightVision.
+        Register("nvg_dump_mat_params", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().DumpMaterialParams(world); });
+
+        // nvg_mobile_dump - Dump MobilePostProcessSubsystem NV-related fields.
+        Register("nvg_mobile_dump", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::NVGSubsystem::Get().DumpMobileSubsystem(); });
+
+        // nvg_create_mid - Create a UMaterialInstanceDynamic from MI_PP_NightVision
+        Register("nvg_create_mid", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().CreateAndApplyNVGMid(world); });
+
+        // nvg_remove_mid - Remove the NVG MID from camera blendables
+        Register("nvg_remove_mid", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().RemoveNVGMid(world); });
+
+        // nvg_mid_param <name> <value> - Set a scalar parameter on the NVG MID
+        Register("nvg_mid_param", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.size() < 2)
+                return "Usage: nvg_mid_param <paramName> <value>\nRun nvg_dump_mat_params to find names.";
+            float val = 0.0f;
+            try { val = std::stof(args[1]); }
+            catch (...) { return "Invalid value: " + args[1]; }
+            return Mod::NVGSubsystem::Get().SetMIDScalarParam(args[0], val); });
+
+        // nvg_mid_vec <name> <r> <g> <b> <a> - Set a vector parameter on the NVG MID
+        Register("nvg_mid_vec", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.size() < 5)
+                return "Usage: nvg_mid_vec <paramName> <r> <g> <b> <a>";
+            float r=0,g=0,b=0,a=1;
+            try { r=std::stof(args[1]); g=std::stof(args[2]); b=std::stof(args[3]); a=std::stof(args[4]); }
+            catch (...) { return "Invalid args"; }
+            return Mod::NVGSubsystem::Get().SetMIDVectorParam(args[0], r, g, b, a); });
+
+        // nvg_dump_all - Dump params for ALL camera blendable materials
+        Register("nvg_dump_all", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().DumpAllBlendableParams(world); });
+
+        // nvg_mobile_w <field> <value> - Write to MobilePostProcessSubsystem field
+        Register("nvg_mobile_w", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.size() < 2)
+                return "Usage: nvg_mobile_w <field> <value>\nFields: nvfactor vigradius nvilmin nvilmax nvolmin nvolmax sat con blink fade";
+            float val = 0.0f;
+            try { val = std::stof(args[1]); }
+            catch (...) { return "Invalid value: " + args[1]; }
+            return Mod::NVGSubsystem::Get().WriteMobileSubsystem(args[0], val); });
+
+        // nvg_mid_fix [index] - Create MID and REPLACE blendable slot
+        Register("nvg_mid_fix", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            int index = 4;
+            if (!args.empty()) {
+                try { index = std::stoi(args[0]); }
+                catch (...) { return "Invalid index: " + args[0]; }
+            }
+            return Mod::NVGSubsystem::Get().MIDReplaceSlot(world, index); });
+
+        // nvg_mid_undo - Restore original blendable object in MID-replaced slot
+        Register("nvg_mid_undo", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().MIDRestoreSlot(world); });
+
+        // nvg_pp_dump - Dump current camera PP values
+        Register("nvg_pp_dump", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().DumpCameraPP(world); });
+
+        // nvg_pp_set <field> <value> - Set a camera PP field directly
+        Register("nvg_pp_set", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (args.size() < 2)
+                return "Usage: nvg_pp_set <field> <value>\nFields: vig aeb bloom grain fringe toe slope green red blue sharp ppw temp";
+            float val = 0.0f;
+            try { val = std::stof(args[1]); }
+            catch (...) { return "Invalid value: " + args[1]; }
+            return Mod::NVGSubsystem::Get().SetCameraPPField(world, args[0], val); });
+
+        // nvg_blend <index> <weight> - Activate/deactivate any blendable by index
+        Register("nvg_blend", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (args.size() < 2)
+                return "Usage: nvg_blend <index> <weight>\nBlendables: 0=M_LowHealth 1=VisionPP 2=VisionPP_Distorsion 3=DistortionZone 4=MI_PP_NightVision 5=M_FogAnomaly";
+            int idx = 0; float w = 0.0f;
+            try { idx = std::stoi(args[0]); w = std::stof(args[1]); }
+            catch (...) { return "Invalid args"; }
+            return Mod::NVGSubsystem::Get().ActivateBlendable(world, idx, w); });
+        */  // end disabled diagnostic commands
+
+        // nvg_intensity <0.1-5.0> - Set NVG brightness/gain
+        Register("nvg_intensity", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_intensity <0.1-5.0>\nCurrent: " + Mod::NVGSubsystem::Get().GetStatus();
+
+            float val = 1.0f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+
+            Mod::NVGSubsystem::Get().SetIntensity(val);
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_grain <0.0-1.0> - Set NVG noise/grain amount
+        Register("nvg_grain", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_grain <0.0-1.0>\nCurrent: " + Mod::NVGSubsystem::Get().GetStatus();
+
+            float val = 0.3f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+
+            Mod::NVGSubsystem::Get().SetGrain(val);
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_bloom <0.0-10.0> - Set bloom for light sources
+        Register("nvg_bloom", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_bloom <0.0-10.0>\nCurrent: " + Mod::NVGSubsystem::Get().GetStatus();
+
+            float val = 2.0f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+
+            Mod::NVGSubsystem::Get().SetBloom(val);
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_aberration <0.0-5.0> - Set chromatic aberration / edge distortion
+        Register("nvg_aberration", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_aberration <0.0-5.0>\nCurrent: " + Mod::NVGSubsystem::Get().GetStatus();
+
+            float val = 1.0f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+
+            Mod::NVGSubsystem::Get().SetAberration(val);
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_status - Get current NVG settings
+        Register("nvg_status", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::NVGSubsystem::Get().GetStatus(); });
+
+        // nvg_diag - Comprehensive NVG diagnostics dump
+        Register("nvg_diag", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().RunDiagnostics(world); });
+
+        // ---------------------------------------------------------------
+        // Mesh-based NVG Lens commands
+        // ---------------------------------------------------------------
+
+        // nvg_lens - Setup/teardown the mesh-based NVG lens (manual control)
+        Register("nvg_lens", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            auto& nvg = Mod::NVGSubsystem::Get();
+            if (nvg.IsLensActive())
+                return nvg.TeardownLens(world);
+            else
+                return nvg.SetupLens(world); });
+
+        // nvg_lens_setup - Force setup the lens system
+        Register("nvg_lens_setup", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().SetupLens(world); });
+
+        // nvg_lens_teardown - Force teardown the lens system
+        Register("nvg_lens_teardown", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::NVGSubsystem::Get().TeardownLens(world); });
+
+        // nvg_lens_fov <value> - Set lens capture FOV (10-170 degrees)
+        Register("nvg_lens_fov", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_lens_fov <10-170>\nCurrent FOV: " + std::to_string(Mod::NVGSubsystem::Get().GetLensFOV());
+            float val = 90.0f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+            Mod::NVGSubsystem::Get().SetLensFOV(val);
+            return "Lens FOV set to " + std::to_string(val); });
+
+        // nvg_lens_scale <value> - Set lens mesh scale (0.01-10.0)
+        Register("nvg_lens_scale", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_lens_scale <0.01-10.0>\nCurrent scale: " + std::to_string(Mod::NVGSubsystem::Get().GetLensScale());
+            float val = 0.25f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+            Mod::NVGSubsystem::Get().SetLensScale(val);
+            return "Lens scale set to " + std::to_string(val); });
+
+        // nvg_lens_dist <value> - Set lens mesh distance from camera (1-200 units)
+        Register("nvg_lens_dist", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_lens_dist <1-200>\nCurrent distance: " + std::to_string(Mod::NVGSubsystem::Get().GetLensDistance());
+            float val = 20.0f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+            Mod::NVGSubsystem::Get().SetLensDistance(val);
+            return "Lens distance set to " + std::to_string(val); });
+
+        // nvg_lens_res <value> - Set render target resolution (64-4096, requires restart)
+        Register("nvg_lens_res", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_lens_res <64-4096>\nCurrent resolution: " + std::to_string(Mod::NVGSubsystem::Get().GetLensResolution());
+            int val = 512;
+            try { val = std::stoi(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+            Mod::NVGSubsystem::Get().SetLensResolution(val);
+            return "Lens resolution set to " + std::to_string(val) + " (teardown+setup to apply)"; });
+
+        // nvg_lens_mat <param> <value> - Set a scalar parameter on the lens MID
+        Register("nvg_lens_mat", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (args.size() < 2)
+                return "Usage: nvg_lens_mat <paramName> <value>\\nParams: Rim Scale, RimDepth, GridScale, ImageScale, BrightnessMult, etc.";
+            float val = 0.0f;
+            try { val = std::stof(args[1]); }
+            catch (...) { return "Invalid value: " + args[1]; }
+            return Mod::NVGSubsystem::Get().SetLensMaterialParam(args[0], val); });
+
+        // nvg_lens_rot <pitch> [yaw] [roll] - Set lens mesh rotation
+        Register("nvg_lens_rot", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            if (args.empty())
+                return "Usage: nvg_lens_rot <pitch> [yaw] [roll]\\nDefault: 90 0 0 (faces Plane toward camera)";
+            float pitch = 90.0f, yaw = 0.0f, roll = 0.0f;
+            try { pitch = std::stof(args[0]); } catch (...) { return "Invalid pitch: " + args[0]; }
+            if (args.size() >= 2) { try { yaw = std::stof(args[1]); } catch (...) { return "Invalid yaw: " + args[1]; } }
+            if (args.size() >= 3) { try { roll = std::stof(args[2]); } catch (...) { return "Invalid roll: " + args[2]; } }
+            Mod::NVGSubsystem::Get().SetLensRotation(pitch, yaw, roll);
+            return "Lens rotation set: P=" + std::to_string(pitch) + " Y=" + std::to_string(yaw) + " R=" + std::to_string(roll); });
+
+        // nvg_lens_mat_type <0|1|2> - Switch lens material
+        // 0=M_Lens circular, 1=M_Particle simple, 2=MI_Lens_Magnifer
+        // Requires teardown+setup to take effect. Automatically triggers on next tick via dirty flag.
+        Register("nvg_lens_mat_type", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_lens_mat_type <0|1|2>\n0=M_Lens, 1=M_Particle, 2=MI_Lens_Magnifer\nCurrent: "
+                    + std::to_string(Mod::NVGSubsystem::Get().GetLensMatType());
+            int type = 0;
+            try { type = std::stoi(args[0]); } catch (...) { return "Invalid type: " + args[0]; }
+            Mod::NVGSubsystem::Get().SetLensMatType(type);
+            static const char* names[] = {"M_Lens", "M_Particle", "MI_Lens_Magnifer"};
+            const char* name = (type >= 0 && type <= 2) ? names[type] : "Unknown";
+            return "Lens material type set to " + std::to_string(type)
+                + " (" + name + "). NVG will teardown+setup on next tick."; });
+
+        // nvg_lens_mesh_type <0|1> - Switch lens mesh (0=Plane, 1=Cylinder disc)
+        Register("nvg_lens_mesh_type", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: nvg_lens_mesh_type <0|1>\n0=Plane, 1=Cylinder disc\nCurrent: "
+                    + std::to_string(Mod::NVGSubsystem::Get().GetLensMeshType());
+            int type = 0;
+            try { type = std::stoi(args[0]); } catch (...) { return "Invalid type: " + args[0]; }
+            Mod::NVGSubsystem::Get().SetLensMeshType(type);
+            return "Lens mesh type set to " + std::to_string(type)
+                + (type == 0 ? " (Plane)" : " (Cylinder disc)")
+                + ". NVG will teardown+setup on next tick."; });
+
+        // nvg_lens_offset <y> <z> - Set lens Y/Z offset from camera center
+        Register("nvg_lens_offset", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.size() < 2)
+            {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "Usage: nvg_lens_offset <y> <z>\nCurrent: Y=%.1f Z=%.1f",
+                    Mod::NVGSubsystem::Get().GetLensOffsetY(),
+                    Mod::NVGSubsystem::Get().GetLensOffsetZ());
+                return buf;
+            }
+            float y = 0.0f, z = 0.0f;
+            try { y = std::stof(args[0]); z = std::stof(args[1]); } catch (...) { return "Invalid values"; }
+            Mod::NVGSubsystem::Get().SetLensOffset(y, z);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Lens offset set to Y=%.1f Z=%.1f", y, z);
+            return buf; });
+
+        // nvg_lens_adjust <0|1> - Toggle lens adjust mode (thumbstick moves lens)
+        Register("nvg_lens_adjust", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+            {
+                return std::string("Usage: nvg_lens_adjust <0|1>\nCurrent: ")
+                    + (Mod::NVGSubsystem::Get().IsLensAdjustMode() ? "ON" : "OFF");
+            }
+            bool on = (args[0] == "1" || args[0] == "on" || args[0] == "true");
+            Mod::NVGSubsystem::Get().SetLensAdjustMode(on);
+            return std::string("Lens adjust mode: ") + (on ? "ON" : "OFF")
+                + ". Open menu and use left thumbstick to move lens."; });
+
+        // nvg_cam_offset <x> <y> <z> - Set NVG capture camera offset from VR camera
+        Register("nvg_cam_offset", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.size() < 3)
+            {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "Usage: nvg_cam_offset <x> <y> <z>\nCurrent: X=%.1f Y=%.1f Z=%.1f",
+                    Mod::NVGSubsystem::Get().GetCaptureOffsetX(),
+                    Mod::NVGSubsystem::Get().GetCaptureOffsetY(),
+                    Mod::NVGSubsystem::Get().GetCaptureOffsetZ());
+                return buf;
+            }
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            try { x = std::stof(args[0]); y = std::stof(args[1]); z = std::stof(args[2]); }
+            catch (...) { return "Invalid values"; }
+            Mod::NVGSubsystem::Get().SetCaptureOffset(x, y, z);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "NVG capture offset set to X=%.1f Y=%.1f Z=%.1f", x, y, z);
+            return buf; });
+
+        // nvg_rt_scale <value> - Set render target ImageScale (0=auto)
+        // Controls how big the NVG "painting" is relative to the lens mesh.
+        // Higher = bigger painting = less chance of seeing dark edges.
+        Register("nvg_rt_scale", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& nvg = Mod::NVGSubsystem::Get();
+            if (args.empty())
+            {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "Usage: nvg_rt_scale <value> (0=auto)\nCurrent: %.2f (auto=%.2f)",
+                    nvg.GetRTImageScale(), nvg.ComputeAutoImageScale());
+                return buf;
+            }
+            float val = 0.0f;
+            try { val = std::stof(args[0]); } catch (...) { return "Invalid value"; }
+            nvg.SetRTImageScale(val);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "RT ImageScale set to %.2f (0=auto, computed=%.2f)", val, nvg.ComputeAutoImageScale());
+            return buf; });
+
+        // nvg_rim_scale <value> - Set circular rim radius (bigger = rim pushed further out)
+        Register("nvg_rim_scale", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& nvg = Mod::NVGSubsystem::Get();
+            if (args.empty())
+            {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Usage: nvg_rim_scale <value>\nCurrent: %.1f", nvg.GetRTRimScale());
+                return buf;
+            }
+            float val = 50.0f;
+            try { val = std::stof(args[0]); } catch (...) { return "Invalid value"; }
+            nvg.SetRTRimScale(val);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Rim Scale set to %.1f", val);
+            return buf; });
+
+        // nvg_rim_depth <value> - Set rim sharpness (0=no rim, -100=sharp rim)
+        Register("nvg_rim_depth", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& nvg = Mod::NVGSubsystem::Get();
+            if (args.empty())
+            {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Usage: nvg_rim_depth <value> (0=off, -100=sharp)\nCurrent: %.1f", nvg.GetRTRimDepth());
+                return buf;
+            }
+            float val = 0.0f;
+            try { val = std::stof(args[0]); } catch (...) { return "Invalid value"; }
+            nvg.SetRTRimDepth(val);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Rim Depth set to %.1f", val);
+            return buf; });
+
+        // nvg_image_depth <value> - Set image layer opacity (-500=opaque, 0=transparent)
+        Register("nvg_image_depth", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& nvg = Mod::NVGSubsystem::Get();
+            if (args.empty())
+            {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Usage: nvg_image_depth <value>\nCurrent: %.1f", nvg.GetRTImageDepth());
+                return buf;
+            }
+            float val = -500.0f;
+            try { val = std::stof(args[0]); } catch (...) { return "Invalid value"; }
+            nvg.SetRTImageDepth(val);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Image Depth set to %.1f", val);
+            return buf; });
+
+        // nvg_auto_fov [0|1] - Toggle auto FOV matching
+        Register("nvg_auto_fov", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& nvg = Mod::NVGSubsystem::Get();
+            if (args.empty())
+            {
+                char buf[96];
+                snprintf(buf, sizeof(buf), "AutoFOV: %s (computed=%.1f, current FOV=%.1f)",
+                    nvg.GetAutoFOV() ? "ON" : "OFF", nvg.ComputeAutoFOV(), nvg.GetLensFOV());
+                return buf;
+            }
+            bool enabled = false;
+            try { enabled = std::stoi(args[0]) != 0; } catch (...) { enabled = !nvg.GetAutoFOV(); }
+            nvg.SetAutoFOV(enabled);
+            char buf[96];
+            snprintf(buf, sizeof(buf), "AutoFOV: %s (computed=%.1f)", enabled ? "ON" : "OFF", nvg.ComputeAutoFOV());
+            return buf; });
 
         // Access level: for testing content gated behind access levels without needing to meet requirements in-game.
         Register("access", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string

@@ -75,6 +75,9 @@
     <ClInclude Include="Mod\SpatialAudio.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Mod\NVGSubsystem.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -151,6 +154,9 @@
     </ClCompile>
     <ClCompile Include="CppSDK\SDK\AudioMixer_functions.cpp">
       <Filter>Source Files\SDK</Filter>
+    </ClCompile>
+    <ClCompile Include="Mod\NVGSubsystem.cpp">
+      <Filter>Source Files\Mod</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

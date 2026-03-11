@@ -21,6 +21,7 @@ AILEARNINGS:
 #include "ArenaSubsystem.hpp"
 #include "FriendSubsystem.hpp"
 #include "LoadoutSubsystem.hpp"
+#include "NVGSubsystem.hpp"
 
 #include "..\CppSDK\SDK.hpp"
 
@@ -43,6 +44,9 @@ namespace PortableWidget
     static constexpr int kPageLoadoutSelect = 4;
     static constexpr int kPageSpawnFriend   = 5;
     static constexpr int kPageFriendClass   = 6;
+    static constexpr int kPageNVG            = 7;
+    static constexpr int kPageNVGTuning      = 8;
+    static constexpr int kPageNVGLens        = 9;
 
     // =========================================================================
     // Singleton
@@ -63,6 +67,24 @@ namespace PortableWidget
             LOG_INFO("[HWMenu] Already initialized");
             return;
         }
+        // Postpone until the player controller is valid and widgets can be created. Will be called again on level change.
+        if (!Mod::GameContext::GetPlayerController())
+        {
+            LOG_INFO("[HWMenu] PlayerController not ready, postponing initialization");
+            return;
+        }
+        if (!Mod::GameContext::GetWorld())
+        {
+            LOG_INFO("[HWMenu] World not ready, postponing initialization");
+            return;
+        }
+        if (!Mod::GetCheats())
+        {
+            LOG_INFO("[HWMenu] Cheats subsystem not ready, postponing initialization");
+            return;
+        }
+
+
 
         LOG_INFO("[HWMenu] === Initializing HandWidget Menu System ===");
 
@@ -105,8 +127,11 @@ namespace PortableWidget
         BuildLoadoutSelectPage();
         BuildSpawnFriendPage();
         BuildFriendClassPage();
+        BuildNVGPage();
+        BuildNVGTuningPage();
+        BuildNVGLensPage();
 
-        LOG_INFO("[HWMenu] Menu pages built (7 pages)");
+        LOG_INFO("[HWMenu] Menu pages built (10 pages)");
     }
 
     // =========================================================================
@@ -175,6 +200,14 @@ namespace PortableWidget
                     SDK::UWorld* w = Mod::GameContext::GetWorld();
                     if (c && w) c->SpawnHealItem(w);
                 }
+            });
+
+            items.push_back({"NVG >",
+                []() -> std::string {
+                    return Mod::NVGSubsystem::Get().IsEnabled() ? "ON" : "OFF";
+                },
+                [&menu]() { menu.NavigateToPage(kPageNVG); },
+                true
             });
         });
     }
@@ -563,6 +596,681 @@ namespace PortableWidget
     }
 
     // =========================================================================
+    // NVG PAGE (hub — links to Tuning and Lens sub-pages)
+    // =========================================================================
+    void HandWidgetTestHarness::BuildNVGPage()
+    {
+        leftMenu_->RegisterPage(kPageNVG, "NIGHT VISION", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            // Toggle NVG on/off
+            items.push_back({"NVG Toggle",
+                []() -> std::string {
+                    return Mod::NVGSubsystem::Get().IsEnabled() ? "ON" : "OFF";
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().Toggle();
+                }
+            });
+
+            // Cycle mode: Fullscreen -> LensBlackout -> LensOverlay -> Fullscreen
+            items.push_back({"Mode",
+                []() -> std::string {
+                    return Mod::NVGSubsystem::ModeToString(Mod::NVGSubsystem::Get().GetMode());
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    int next = (static_cast<int>(nvg.GetMode()) + 1) % static_cast<int>(Mod::NVGMode::COUNT);
+                    nvg.SetMode(static_cast<Mod::NVGMode>(next));
+                }
+            });
+
+            // Sub-page: tuning (intensity, grain, bloom, aberration, FOV)
+            items.push_back({"Tuning >",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.NavigateToPage(kPageNVGTuning); }
+            });
+
+            // Sub-page: lens (material, mesh, scale, distance, offsets, adjust)
+            items.push_back({"Lens >",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.NavigateToPage(kPageNVGLens); }
+            });
+
+            // Probe game NVG
+            items.push_back({"Probe NVG",
+                []() -> std::string {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    return nvg.IsProbeComplete() ? (nvg.IsProbeFound() ? "FOUND" : "NOT_FOUND") : "PENDING";
+                },
+                [&menu]() {
+                    auto* world = Mod::GameContext::GetWorld();
+                    if (world) {
+                        auto result = Mod::NVGSubsystem::Get().ProbeGameNVG(world);
+                        LOG_INFO("[NVG] HandWidget probe result:\n" << result);
+                    }
+                }
+            });
+
+            // Dump blendables
+            items.push_back({"Blendables",
+                []() -> std::string { return "Dump"; },
+                [&menu]() {
+                    auto* world = Mod::GameContext::GetWorld();
+                    if (world) {
+                        auto result = Mod::NVGSubsystem::Get().DumpBlendables(world);
+                        LOG_INFO("[NVG] HandWidget blendables:\n" << result);
+                    }
+                }
+            });
+        });
+    }
+
+    // =========================================================================
+    // NVG TUNING PAGE (intensity, grain, bloom, aberration, FOV)
+    // =========================================================================
+    void HandWidgetTestHarness::BuildNVGTuningPage()
+    {
+        leftMenu_->RegisterPage(kPageNVGTuning, "NVG TUNING", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            items.push_back({"Intensity +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetIntensity());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetIntensity(nvg.GetIntensity() + 0.01f);
+                }
+            });
+            items.push_back({"Intensity -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetIntensity());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetIntensity(nvg.GetIntensity() - 0.01f);
+                }
+            });
+            items.push_back({"Intensity ++",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetIntensity());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetIntensity(nvg.GetIntensity() + 0.1f);
+                }
+            });
+            items.push_back({"Intensity --",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetIntensity());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetIntensity(nvg.GetIntensity() - 0.1f);
+                }
+            });
+
+            // --- Grain (+/- 0.2, range 0-5) ---
+            items.push_back({"Grain +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetGrain());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetGrain(nvg.GetGrain() + 0.2f);
+                }
+            });
+            items.push_back({"Grain -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetGrain());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetGrain(nvg.GetGrain() - 0.2f);
+                }
+            });
+
+            // --- Bloom (+/- 2.0, range 0-50) ---
+            items.push_back({"Bloom +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetBloom());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetBloom(nvg.GetBloom() + 2.0f);
+                }
+            });
+            items.push_back({"Bloom -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetBloom());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetBloom(nvg.GetBloom() - 2.0f);
+                }
+            });
+
+            // --- Aberration (+/- 0.5, range 0-10) ---
+            items.push_back({"Aberration +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetAberration());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetAberration(nvg.GetAberration() + 0.5f);
+                }
+            });
+            items.push_back({"Aberration -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetAberration());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetAberration(nvg.GetAberration() - 0.5f);
+                }
+            });
+
+            // --- FOV (+/- 5.0) ---
+            items.push_back({"FOV +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.0f", Mod::NVGSubsystem::Get().GetLensFOV());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensFOV(nvg.GetLensFOV() + 5.0f);
+                }
+            });
+            items.push_back({"FOV -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.0f", Mod::NVGSubsystem::Get().GetLensFOV());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensFOV(nvg.GetLensFOV() - 5.0f);
+                }
+            });
+        });
+    }
+
+    // =========================================================================
+    // NVG LENS PAGE (material, mesh, scale, distance, offsets, adjust mode)
+    // =========================================================================
+    void HandWidgetTestHarness::BuildNVGLensPage()
+    {
+        leftMenu_->RegisterPage(kPageNVGLens, "NVG LENS", [](std::vector<MenuItem>& items, HandWidgetMenu& menu) {
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.GoBack(); }
+            });
+
+            // Cycle material type: 0=M_Lens, 1=M_Particle, 2=MI_Lens_Magnifer
+            items.push_back({"Material",
+                []() -> std::string {
+                    static const char* names[] = {"M_Lens", "M_Particle", "MI_Magnif"};
+                    int t = Mod::NVGSubsystem::Get().GetLensMatType();
+                    if (t >= 0 && t <= 2) return names[t];
+                    return "?";
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    int next = (nvg.GetLensMatType() + 1) % 3;
+                    nvg.SetLensMatType(next);
+                }
+            });
+
+            // Toggle mesh type: 0=Plane, 1=Cylinder disc
+            items.push_back({"Mesh",
+                []() -> std::string {
+                    return Mod::NVGSubsystem::Get().GetLensMeshType() == 0 ? "Plane" : "Cylinder";
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensMeshType(nvg.GetLensMeshType() == 0 ? 1 : 0);
+                }
+            });
+
+            // --- Scale (+/- 0.02) ---
+            items.push_back({"Scale +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.2f", Mod::NVGSubsystem::Get().GetLensScale());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensScale(nvg.GetLensScale() + 0.02f);
+                }
+            });
+            items.push_back({"Scale -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.2f", Mod::NVGSubsystem::Get().GetLensScale());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensScale(nvg.GetLensScale() - 0.02f);
+                }
+            });
+
+            // --- Distance (+/- 1.0) ---
+            items.push_back({"Dist +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetLensDistance());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensDistance(nvg.GetLensDistance() + 1.0f);
+                }
+            });
+            items.push_back({"Dist -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetLensDistance());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensDistance(nvg.GetLensDistance() - 1.0f);
+                }
+            });
+
+            // --- Offset Y (+/- 0.5) ---
+            items.push_back({"Offset Y +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetLensOffsetY());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensOffset(nvg.GetLensOffsetY() + 0.5f, nvg.GetLensOffsetZ());
+                }
+            });
+            items.push_back({"Offset Y -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetLensOffsetY());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensOffset(nvg.GetLensOffsetY() - 0.5f, nvg.GetLensOffsetZ());
+                }
+            });
+
+            // --- Offset Z (+/- 0.5) ---
+            items.push_back({"Offset Z +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetLensOffsetZ());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensOffset(nvg.GetLensOffsetY(), nvg.GetLensOffsetZ() + 0.5f);
+                }
+            });
+            items.push_back({"Offset Z -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetLensOffsetZ());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensOffset(nvg.GetLensOffsetY(), nvg.GetLensOffsetZ() - 0.5f);
+                }
+            });
+
+            // ----------------------------------------------------------------
+            // Cylinder rotation controls — 90 degree increments per axis.
+            //
+            // UE axis convention (for reference while testing):
+            //   Pitch = around Y (tilts forward/back)
+            //   Yaw   = around Z (rotates left/right)
+            //   Roll  = around X (tilts sideways)
+            //
+            // Current defaults that made the lens visible: P180 / Y270 / R270.
+            // Use these buttons to find the orientation where the circular face
+            // of the cylinder is pointing toward the camera (viewer-facing disc).
+            // Each button press is logged via [NVG] StepLensRot* so you can
+            // correlate button presses with log output if the visual result is
+            // not obvious.
+            // ----------------------------------------------------------------
+
+            // --- Pitch (around Y) ---
+            items.push_back({"Pitch+90",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "P=%.0f", Mod::NVGSubsystem::Get().GetLensRotPitch());
+                    return buf;
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().StepLensRotPitch(+90.0f);
+                }
+            });
+            items.push_back({"Pitch-90",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "P=%.0f", Mod::NVGSubsystem::Get().GetLensRotPitch());
+                    return buf;
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().StepLensRotPitch(-90.0f);
+                }
+            });
+
+            // --- Yaw (around Z) ---
+            items.push_back({"Yaw+90",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "Y=%.0f", Mod::NVGSubsystem::Get().GetLensRotYaw());
+                    return buf;
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().StepLensRotYaw(+90.0f);
+                }
+            });
+            items.push_back({"Yaw-90",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "Y=%.0f", Mod::NVGSubsystem::Get().GetLensRotYaw());
+                    return buf;
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().StepLensRotYaw(-90.0f);
+                }
+            });
+
+            // --- Roll (around X) ---
+            items.push_back({"Roll+90",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "R=%.0f", Mod::NVGSubsystem::Get().GetLensRotRoll());
+                    return buf;
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().StepLensRotRoll(+90.0f);
+                }
+            });
+            items.push_back({"Roll-90",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "R=%.0f", Mod::NVGSubsystem::Get().GetLensRotRoll());
+                    return buf;
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().StepLensRotRoll(-90.0f);
+                }
+            });
+
+            // Reset all rotation to the last known working values (P0 Y0 R0 = identity,
+            // P180/Y270/R270 = previous hand-tuned default).  Two quick-reset buttons
+            // give fast recovery to a known state without typing commands.
+            items.push_back({"Rot Reset0",
+                []() -> std::string { return "P0 Y0 R0"; },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    LOG_INFO("[NVG] RotReset0: resetting PYR to 0/0/0");
+                    nvg.SetLensRotation(0.0f, 0.0f, 0.0f);
+                    LOG_INFO("[NVG] RotReset0 done: PYR="
+                        << nvg.GetLensRotPitch() << "/" << nvg.GetLensRotYaw() << "/" << nvg.GetLensRotRoll());
+                }
+            });
+            items.push_back({"Rot Reset90",
+                []() -> std::string { return "P90 Y0 R0"; },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    LOG_INFO("[NVG] RotReset90: resetting PYR to 90/0/0");
+                    nvg.SetLensRotation(90.0f, 0.0f, 0.0f);
+                    LOG_INFO("[NVG] RotReset90 done: PYR="
+                        << nvg.GetLensRotPitch() << "/" << nvg.GetLensRotYaw() << "/" << nvg.GetLensRotRoll());
+                }
+            });
+            // Cylinder working rotation confirmed 2026-03-11: P270/Y180/R270
+            items.push_back({"Rot Dflt",
+                []() -> std::string { return "P270 Y180 R270"; },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    LOG_INFO("[NVG] RotDefault: resetting PYR to 270/180/270 (cylinder confirmed)");
+                    nvg.SetLensRotation(270.0f, 180.0f, 270.0f);
+                    LOG_INFO("[NVG] RotDefault done: PYR="
+                        << nvg.GetLensRotPitch() << "/" << nvg.GetLensRotYaw() << "/" << nvg.GetLensRotRoll());
+                }
+            });
+            // Alternative: P90/Y180/R270 (also works but slightly offset)
+            items.push_back({"Rot Alt",
+                []() -> std::string { return "P90 Y180 R270"; },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    LOG_INFO("[NVG] RotAlt: resetting PYR to 90/180/270 (alt cylinder)");
+                    nvg.SetLensRotation(90.0f, 180.0f, 270.0f);
+                    LOG_INFO("[NVG] RotAlt done: PYR="
+                        << nvg.GetLensRotPitch() << "/" << nvg.GetLensRotYaw() << "/" << nvg.GetLensRotRoll());
+                }
+            });
+
+            // Toggle lens adjust mode (thumbstick moves lens)
+            items.push_back({"Stick Adjust",
+                []() -> std::string {
+                    return Mod::NVGSubsystem::Get().IsLensAdjustMode() ? "ON" : "OFF";
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetLensAdjustMode(!nvg.IsLensAdjustMode());
+                }
+            });
+
+            // --- Camera Offset X (+/- 1.0) — shift NVG capture forward/back ---
+            items.push_back({"CamOff X +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetCaptureOffsetX());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetCaptureOffset(nvg.GetCaptureOffsetX() + 1.0f, nvg.GetCaptureOffsetY(), nvg.GetCaptureOffsetZ());
+                }
+            });
+            items.push_back({"CamOff X -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetCaptureOffsetX());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetCaptureOffset(nvg.GetCaptureOffsetX() - 1.0f, nvg.GetCaptureOffsetY(), nvg.GetCaptureOffsetZ());
+                }
+            });
+
+            // --- Camera Offset Y (+/- 1.0) — shift NVG capture left/right ---
+            items.push_back({"CamOff Y +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetCaptureOffsetY());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetCaptureOffset(nvg.GetCaptureOffsetX(), nvg.GetCaptureOffsetY() + 1.0f, nvg.GetCaptureOffsetZ());
+                }
+            });
+            items.push_back({"CamOff Y -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetCaptureOffsetY());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetCaptureOffset(nvg.GetCaptureOffsetX(), nvg.GetCaptureOffsetY() - 1.0f, nvg.GetCaptureOffsetZ());
+                }
+            });
+
+            // --- Camera Offset Z (+/- 1.0) — shift NVG capture up/down ---
+            items.push_back({"CamOff Z +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetCaptureOffsetZ());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetCaptureOffset(nvg.GetCaptureOffsetX(), nvg.GetCaptureOffsetY(), nvg.GetCaptureOffsetZ() + 1.0f);
+                }
+            });
+            items.push_back({"CamOff Z -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetCaptureOffsetZ());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetCaptureOffset(nvg.GetCaptureOffsetX(), nvg.GetCaptureOffsetY(), nvg.GetCaptureOffsetZ() - 1.0f);
+                }
+            });
+
+            // --- Render target / material projection controls ---
+            // These control how the NVG "painting" maps onto the lens mesh.
+            // Fixing dark edge encroachment by eliminating rim mask and auto-scaling image.
+
+            items.push_back({"ImgScale +",
+                []() -> std::string {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    float val = nvg.GetRTImageScale();
+                    char buf[24];
+                    if (val <= 0.01f)
+                        snprintf(buf, sizeof(buf), "auto(%.1f)", nvg.ComputeAutoImageScale());
+                    else
+                        snprintf(buf, sizeof(buf), "%.1f", val);
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    float cur = nvg.GetRTImageScale();
+                    if (cur <= 0.01f) cur = nvg.ComputeAutoImageScale();
+                    nvg.SetRTImageScale(cur + 0.5f);
+                }
+            });
+            items.push_back({"ImgScale -",
+                []() -> std::string {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    float val = nvg.GetRTImageScale();
+                    char buf[24];
+                    if (val <= 0.01f)
+                        snprintf(buf, sizeof(buf), "auto(%.1f)", nvg.ComputeAutoImageScale());
+                    else
+                        snprintf(buf, sizeof(buf), "%.1f", val);
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    float cur = nvg.GetRTImageScale();
+                    if (cur <= 0.01f) cur = nvg.ComputeAutoImageScale();
+                    float next = cur - 0.5f;
+                    if (next < 0.5f) next = 0.0f;  // 0 = auto mode
+                    nvg.SetRTImageScale(next);
+                }
+            });
+            items.push_back({"ImgScale 0",
+                []() -> std::string {
+                    return "auto";
+                },
+                []() {
+                    Mod::NVGSubsystem::Get().SetRTImageScale(0.0f);
+                }
+            });
+
+            items.push_back({"RimScale +",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetRTRimScale());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetRTRimScale(nvg.GetRTRimScale() + 5.0f);
+                }
+            });
+            items.push_back({"RimScale -",
+                []() -> std::string {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f", Mod::NVGSubsystem::Get().GetRTRimScale());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetRTRimScale(nvg.GetRTRimScale() - 5.0f);
+                }
+            });
+
+            items.push_back({"Rim On/Off",
+                []() -> std::string {
+                    float depth = Mod::NVGSubsystem::Get().GetRTRimDepth();
+                    return depth < -0.1f ? "ON" : "OFF";
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    if (nvg.GetRTRimDepth() < -0.1f)
+                        nvg.SetRTRimDepth(0.0f);  // Turn rim off
+                    else
+                        nvg.SetRTRimDepth(-100.0f);  // Turn rim on (sharp edge)
+                }
+            });
+
+            items.push_back({"AutoFOV",
+                []() -> std::string {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%s(%.0f)", nvg.GetAutoFOV() ? "ON" : "OFF", nvg.ComputeAutoFOV());
+                    return buf;
+                },
+                []() {
+                    auto& nvg = Mod::NVGSubsystem::Get();
+                    nvg.SetAutoFOV(!nvg.GetAutoFOV());
+                }
+            });
+        });
+    }
+
+    // =========================================================================
     // Ensure bindings (handles level transitions, player respawns)
     // =========================================================================
     void HandWidgetTestHarness::EnsureBindings(SDK::UWorld* world)
@@ -629,7 +1337,14 @@ namespace PortableWidget
     void HandWidgetTestHarness::Tick(SDK::UWorld* world)
     {
         if (!initialized_)
-            return;
+        {
+            // Retry initialization — may have failed earlier due to null PC/World/Cheats
+            // which can happen after level transitions or during loading screens.
+            Initialize();
+            if (!initialized_)
+                return;
+            LOG_INFO("[HandWidget] Late-initialized successfully on retry");
+        }
 
         if (!world)
             return;
@@ -898,20 +1613,33 @@ namespace PortableWidget
         LOG_INFO("[HWMenu] Shutting down");
 
         if (leftMenu_) leftMenu_->Close();
+        LOG_INFO("[HWMenu] Left menu closed");
         if (leftNotif_) leftNotif_->ClearAll();
+        LOG_INFO("[HWMenu] Left notifications cleared");
         if (rightNotif_) rightNotif_->ClearAll();
+        LOG_INFO("[HWMenu] Right notifications cleared");
 
-        leftMux_.reset();
-        rightMux_.reset();
-        leftMenu_.reset();
-        leftNotif_.reset();
-        rightNotif_.reset();
-        leftMenuHW_.reset();
-        leftNotifHW_.reset();
-        rightNotifHW_.reset();
+        // leftMux_.reset();
+        // LOG_INFO("[HWMenu] Left multiplexer reset");
+        // rightMux_.reset();
+        // LOG_INFO("[HWMenu] Right multiplexer reset");
+        // leftMenu_.reset();
+        // LOG_INFO("[HWMenu] Left menu reset");
+        // leftNotif_.reset();
+        // LOG_INFO("[HWMenu] Left notifications reset");
+        // rightNotif_.reset();
+        // LOG_INFO("[HWMenu] Right notifications reset");
+        // leftMenuHW_.reset();
+        // LOG_INFO("[HWMenu] Left menu HW reset");
+        // leftNotifHW_.reset();
+        // LOG_INFO("[HWMenu] Left notifications HW reset");
+        // rightNotifHW_.reset();
+        // LOG_INFO("[HWMenu] Right notifications HW reset");
 
         leftBound_ = false;
+        LOG_INFO("[HWMenu] Left bound reset");
         rightBound_ = false;
+        LOG_INFO("[HWMenu] Right bound reset");
         initialized_ = false;
 
         LOG_INFO("[HWMenu] Shutdown complete");

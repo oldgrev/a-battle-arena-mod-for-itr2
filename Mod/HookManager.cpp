@@ -80,6 +80,7 @@
 
 #include "ModFeedback.hpp"
 #include "GameContext.hpp"
+#include "NVGSubsystem.hpp"
 
 #include <Windows.h>
 #include <array>
@@ -1733,8 +1734,16 @@ namespace Mod
 
             // FInputActionValue: double X (strafe), double Y (forward/back), double Z (0), ValueType
             const double* axisDoubles = reinterpret_cast<const double*>(parms);
-            const double axisX = axisDoubles[0];  // left/right (strafe) — ignore for vertical nav
-            const double axisY = axisDoubles[1];  // forward/backward — use as vertical nav axis
+            const double axisX = axisDoubles[0];  // left/right (strafe)
+            const double axisY = axisDoubles[1];  // forward/backward
+
+            // If NVG lens adjust mode is active, route BOTH axes to lens positioning
+            if (Mod::NVGSubsystem::Get().IsLensAdjustMode())
+            {
+                Mod::NVGSubsystem::Get().ApplyLensAdjust(
+                    static_cast<float>(axisX), static_cast<float>(axisY));
+                return true;  // Suppress game movement; skip menu nav
+            }
 
             hw->OnNavigate(static_cast<float>(axisY));
 

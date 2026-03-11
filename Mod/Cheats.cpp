@@ -29,6 +29,7 @@ SetUnlimitedAmmo/SetGodMode/etc.
 #include "ArenaSubsystem.hpp"
 #include "ModTuning.hpp"
 #include "GameContext.hpp"  // for world access when interacting with subsystems
+#include "NVGSubsystem.hpp"
 
 // forward declare cheat subsystem type for convenience
 using CheatSubsystem_t = SDK::URadiusCheatSubsystem;
@@ -403,7 +404,8 @@ namespace Mod
              << " [radius=" << plantsBushesRule_.radius << ", interval=" << plantsBushesRule_.intervalSeconds << "s]\n";
          status << "  Remove Trees (persistent): " << (treesRule_.enabled ? "ON" : "off")
              << " [radius=" << treesRule_.radius << ", interval=" << treesRule_.intervalSeconds << "s]\n";
-        status << "  Debug Mode: " << (debugModeActive_ ? "ON" : "off");
+        status << "  Debug Mode: " << (debugModeActive_ ? "ON" : "off") << "\n";
+        status << "  " << NVGSubsystem::Get().GetStatus();
         return status.str();
     }
 
@@ -423,6 +425,9 @@ namespace Mod
         treesRule_.enabled = false;
         pendingEnvironmentPruneBatches_.clear();
         // Note: anomaliesDisabled_ is NOT toggled on level change -- it persists intentionally.
+
+        // Shutdown NVG on level change to avoid stale pointers
+        NVGSubsystem::Get().Shutdown();
 
         // Clear any cached light pointers/intensities on level change.
         //portableLightOriginalIntensity_.clear();
@@ -618,6 +623,9 @@ namespace Mod
 
         // Environment pruning: delayed deletion queue and optional persistent collectors.
         UpdateEnvironmentPrune(world, player);
+
+        // Night vision goggle subsystem update
+        NVGSubsystem::Get().Update(world);
     }
 
     // body dilation doesn't even work, arms and the player weapon move so slow which is crap in vr. to do

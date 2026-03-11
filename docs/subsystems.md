@@ -664,3 +664,112 @@ SpatialAudio::SetSourcePosition(h, newSourcePos);
 SpatialAudio::SetListenerState(playerPos, playerFwd, playerRight);
 SpatialAudio::Tick();
 ```
+
+---
+
+## NVGSubsystem
+
+**File:** `Mod/NVGSubsystem.cpp/.hpp`
+
+Night vision goggle cheat using camera post-process settings with game NVG blendable discovery for lens masking.
+
+### History
+
+- **Approach A** (UMobilePostProcessSubsystem): Removed — non-functional on PC.
+- **Approach B** (Camera PP v1/v2): v1 had no light amplification; v2 used massive EV bias that blew out highlights.
+- **Approach C** (SetNV/SwitchPPElement): Removed as standalone — right-eye-only in VR. Its mechanism is now studied via `ProbeGameNVG()` to discover the blendable material the game uses.
+
+### Current Approach (v3)
+
+Single camera post-process approach with three improvements over v2:
+
+1. **Shadow-specific color grading**: `ColorGammaShadows` and `ColorGainShadows` to lift dark areas with green tint while leaving bright areas relatively untouched.
+2. **Tone mapping**: `FilmToe` lifted to brighten darks without blowing highlights. Moderate `FilmSlope` and `FilmShoulder`.
+3. **Moderate auto-exposure**: +2.5 EV at default intensity (not +10). Manual mode to prevent engine fighting the bias.
+
+### Display Modes
+
+| ID | Name | Description |
+|----|------|-------------|
+| 0 | Fullscreen | Camera PP only — both eyes get green tint. Best stereo option currently. |
+| 1 | LensBlackout | Camera PP (both eyes) + sets `MI_PP_NightVision` weight=1. The NVG lens circle is right-eye-only due to stereo bug in MI_PP_NightVision shader. |
+| 2 | LensOverlay | Same as LensBlackout currently. Lens masking is identical until stereo fix found. |
+| 3 | GameNVGOnly | Pure `SetNV(true)` delegation, no camera PP. Right-eye-only. For isolated stereo testing and comparison. |
+
+### Confirmed Blendables Array (2026-03-09)
+
+The camera's `WeightedBlendables` always contains exactly 6 static entries. `SetNV(true)` does **not** add a new entry — it changes the weight of the existing `MI_PP_NightVision` entry from 0 to 1:
+
+| Index | Name | Trigger |
+|-------|------|---------|
+| 0 | `M_LowHealth` | Health below threshold (flashing red vignette) |
+| 1 | `VisionPP` | Unknown |
+| 2 | `VisionPP_DistorsionHelmet` | Distortion helmet equipped |
+| 3 | `DistortionZonePP` | Entering a distortion zone |
+| 4 | `MI_PP_NightVision` | **NVG — SetNV(true) sets weight=1** |
+| 5 | `M_FogAnomalyPostProcess` | Fog anomaly present |
+
+**Stereo bug:** `MI_PP_NightVision` renders right-eye-only in VR headset. The material shader likely checks `StereoPassIndex`. This is an in-engine material limitation — we cannot fix it without editing the shader.
+
+**Workaround:** Fullscreen mode (camera PP only) applies both-eye green tint. Use mode 3 (GameNVGOnly) for isolated per-eye comparison testing.
+
+### Tuning Parameters
+
+- **Intensity** (0.1–5.0, default 1.0): Overall NVG brightness multiplier (affects exposure, shadow grading, tone mapping)
+- **Grain** (0.0–1.0, default 0.3): Film grain / noise for realistic NVG static
+- **Bloom** (0.0–10.0, default 2.0): Bloom around light sources
+- **Aberration** (0.0–5.0, default 1.0): Chromatic aberration
+
+### Key Methods
+
+```cpp
+void Toggle();                     // Toggle NVG on/off
+void SetEnabled(bool enabled);     // Explicit on/off
+void SetMode(NVGMode mode);        // Fullscreen/LensBlackout/LensOverlay
+void SetIntensity(float v);        // 0.1–5.0
+void SetGrain(float v);            // 0.0–1.0
+void SetBloom(float v);            // 0.0–10.0
+void SetAberration(float v);       // 0.0–5.0
+void Update(SDK::UWorld* world);   // Called every tick from Cheats::Update
+void Shutdown();                   // Called on level change / deactivation
+std::string GetStatus() const;     // Human-readable status string
+
+// Diagnostic / discovery
+std::string ProbeGameNVG(SDK::UWorld* world);            // Discover game's NVG blendable
+std::string ProbePPElement(SDK::UWorld* world, int i, bool on);  // Test SwitchPPElement directly
+std::string RunDiagnostics(SDK::UWorld* world);          // Comprehensive state dump
+std::string DumpBlendables(SDK::UWorld* world);          // Camera WeightedBlendables list
+```
+
+### Architecture Notes
+
+- Singleton pattern via `NVGSubsystem::Get()`
+- Called from `Cheats::Update()` every tick; continuously reapplies values to combat game resetting them
+- Original PP values captured on first apply and restored on disable (includes shadow grading + tone mapping fields)
+- World change detection resets all cached state including probe results to avoid dangling pointers
+- `ScopedProcessEventGuard` used for all ProcessEvent-based SDK calls
+- `FWeightedBlendable` entries added to camera PP at runtime for lens masking
+
+### PP Override Details (v3)
+
+| Setting | Value | Purpose |
+|---------|-------|--------|
+| AutoExposureMethod | AEM_Manual | Prevents engine from fighting exposure boost |
+| AutoExposureBias | 1.0 + intensity×1.5 | Moderate EV boost (+2.5 at default) |
+| FilmToe | 0.6 + intensity×0.15 | Lift dark areas (default 0.75, up to 1.35) |
+| FilmSlope | 0.88 | Slightly below default (0.88 vs 0.88) |
+| FilmShoulder | 0.18 | Lower shoulder = less highlight rolloff |
+| ColorGammaShadows | {1, 1+i×0.15, 1, 1} | Lift shadow gamma in green channel |
+| ColorGainShadows | {0.4, 0.6+i×0.4, 0.35, 1} | Green gain in shadows only |
+| ColorSaturation | {0.35, 0.6, 0.35, 1} | Partial desaturation (NVG monochrome) |
+| ColorGain | {0.6, 0.9+i×0.2, 0.55, 1} | Subtle overall green tint |
+| ColorOffset | {0, 0.01+i×0.01, 0, 0} | Green phosphor floor in total darkness |
+| BloomIntensity | bloom×0.8 | Light source bloom |
+| VignetteIntensity | 0.4 | Light edge darkening for immersion |
+| AO/MotionBlur | 0.0 | Disabled under NVG |
+
+### Testing Log
+
+- **v1 (Approach B)**: Green tint but no light amplification. Auto-exposure in histogram mode fought the bias.
+- **v2 (Approach B rewrite)**: Massive EV bias made everything too bright/green. Distant detail lost. Vignette-based lens masking was just edge darkening, not a proper lens circle.
+- **v3 (current)**: Shadow-specific grading + tone mapping + moderate exposure. NVG probe system for lens modes. Awaiting VR test.

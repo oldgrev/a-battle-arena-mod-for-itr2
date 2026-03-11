@@ -177,6 +177,7 @@
     <ClInclude Include="Mod\HandWidgetMenu.hpp" />
     <ClInclude Include="Mod\HandWidgetMultiplexer.hpp" />
     <ClInclude Include="Mod\HandWidgetTestHarness.hpp" />
+    <ClInclude Include="Mod\NVGSubsystem.hpp" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
@@ -184,6 +185,7 @@
     <ClCompile Include="CppSDK\SDK\AudioMixer_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\Basic.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_RadiusPlayerCharacter_Gameplay_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\BPC_PlayerPostProcess_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_IngameMenu_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\BPA_FaceFollowingMenu_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_InfoPanel_functions.cpp" />
@@ -215,6 +217,7 @@
     <ClCompile Include="Mod\HandWidgetMenu.cpp" />
     <ClCompile Include="Mod\HandWidgetMultiplexer.cpp" />
     <ClCompile Include="Mod\HandWidgetTestHarness.cpp" />
+    <ClCompile Include="Mod\NVGSubsystem.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

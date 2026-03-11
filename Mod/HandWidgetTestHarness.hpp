@@ -116,6 +116,9 @@ namespace PortableWidget
         void BuildLoadoutSelectPage();
         void BuildSpawnFriendPage();
         void BuildFriendClassPage();
+        void BuildNVGPage();
+        void BuildNVGTuningPage();
+        void BuildNVGLensPage();
 
         // Command handlers
         std::string HandleTestCommand(SDK::UWorld* world, const std::vector<std::string>& args);

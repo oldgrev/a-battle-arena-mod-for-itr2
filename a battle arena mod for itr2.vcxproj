@@ -178,6 +178,7 @@
     <ClInclude Include="Mod\HandWidgetMultiplexer.hpp" />
     <ClInclude Include="Mod\HandWidgetTestHarness.hpp" />
     <ClInclude Include="Mod\NVGSubsystem.hpp" />
+    <ClInclude Include="Mod\ScopeNVGSubsystem.hpp" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
@@ -188,6 +189,7 @@
     <ClCompile Include="CppSDK\SDK\BPC_PlayerPostProcess_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_IngameMenu_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\BPA_FaceFollowingMenu_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\BPA_Scope_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\BP_InfoPanel_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\FPS_VRCharacter_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\CoreUObject_functions.cpp" />
@@ -218,6 +220,7 @@
     <ClCompile Include="Mod\HandWidgetMultiplexer.cpp" />
     <ClCompile Include="Mod\HandWidgetTestHarness.cpp" />
     <ClCompile Include="Mod\NVGSubsystem.cpp" />
+    <ClCompile Include="Mod\ScopeNVGSubsystem.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

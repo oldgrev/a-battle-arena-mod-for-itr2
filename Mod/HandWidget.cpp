@@ -404,10 +404,10 @@ namespace PortableWidget
 
         Mod::ScopedProcessEventGuard guard;
 
-        // In the hand's local frame: X = forward (away from hand)
+        // In the hand's local frame: Z = forward (away from hand)
         SDK::FHitResult dummyHit{};
         component_->K2_SetRelativeLocation(
-            SDK::FVector{static_cast<double>(cm), 0.0, 0.0}, false, &dummyHit, true);
+            SDK::FVector{20.0, 0.0,static_cast<double>(cm)}, false, &dummyHit, true);
     }
 
     void HandWidget::SetVisible(bool visible)

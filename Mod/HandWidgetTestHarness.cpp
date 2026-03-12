@@ -22,6 +22,7 @@ AILEARNINGS:
 #include "FriendSubsystem.hpp"
 #include "LoadoutSubsystem.hpp"
 #include "NVGSubsystem.hpp"
+#include "ScopeNVGSubsystem.hpp"
 
 #include "..\CppSDK\SDK.hpp"
 
@@ -47,6 +48,7 @@ namespace PortableWidget
     static constexpr int kPageNVG            = 7;
     static constexpr int kPageNVGTuning      = 8;
     static constexpr int kPageNVGLens        = 9;
+    static constexpr int kPageScopeNVG        = 10;
 
     // =========================================================================
     // Singleton
@@ -130,8 +132,9 @@ namespace PortableWidget
         BuildNVGPage();
         BuildNVGTuningPage();
         BuildNVGLensPage();
+        BuildScopeNVGPage();
 
-        LOG_INFO("[HWMenu] Menu pages built (10 pages)");
+        LOG_INFO("[HWMenu] Menu pages built (11 pages)");
     }
 
     // =========================================================================
@@ -638,6 +641,18 @@ namespace PortableWidget
             items.push_back({"Lens >",
                 []() -> std::string { return ""; },
                 [&menu]() { menu.NavigateToPage(kPageNVGLens); }
+            });
+
+            // Sub-page: weapon scope NVG
+            items.push_back({"Scope NVG >",
+                []() -> std::string {
+                    auto& sn = Mod::ScopeNVGSubsystem::Get();
+                    int count = sn.GetScopeCount();
+                    if (count == 0) return "No Scopes";
+                    return sn.AnyNVGEnabled() ? "ON" : "OFF";
+                },
+                [&menu]() { menu.NavigateToPage(kPageScopeNVG); },
+                true
             });
 
             // Probe game NVG
@@ -1603,6 +1618,99 @@ namespace PortableWidget
         }
 
         return "Unknown subcommand: " + subcmd + ". Try: hwtest";
+    }
+
+    // =========================================================================
+    // Scope NVG Page — dynamically lists scopes with toggle buttons
+    // =========================================================================
+    void HandWidgetTestHarness::BuildScopeNVGPage()
+    {
+        auto& menu = *leftMenu_;
+
+        menu.RegisterPage(kPageScopeNVG, "SCOPE NVG", [](std::vector<MenuItem>& items, HandWidgetMenu& menu)
+        {
+            auto& sn = Mod::ScopeNVGSubsystem::Get();
+
+            // Auto-scan scopes when page opens (so the list is fresh)
+            SDK::UWorld* w = Mod::GameContext::GetWorld();
+            if (w && sn.GetScopeCount() == 0)
+            {
+                LOG_INFO("[HWMenu] ScopeNVG page opened with 0 scopes — running auto-scan");
+                sn.ScanScopes(w);
+            }
+
+            // Back
+            items.push_back({"< Back",
+                []() -> std::string { return ""; },
+                [&menu]() { menu.NavigateToPage(kPageNVG); }
+            });
+
+            // Scan scopes button
+            items.push_back({"Scan Scopes",
+                []() -> std::string {
+                    return std::to_string(Mod::ScopeNVGSubsystem::Get().GetScopeCount()) + " found";
+                },
+                []() {
+                    SDK::UWorld* w = Mod::GameContext::GetWorld();
+                    if (!w) return;
+                    std::string result = Mod::ScopeNVGSubsystem::Get().ScanScopes(w);
+                    LOG_INFO("[HWMenu] Scope scan: " << result);
+                }
+            });
+
+            // Enable All / Disable All
+            items.push_back({"Enable All",
+                []() -> std::string {
+                    return Mod::ScopeNVGSubsystem::Get().AnyNVGEnabled() ? "Active" : "";
+                },
+                []() {
+                    std::string result = Mod::ScopeNVGSubsystem::Get().EnableAll();
+                    LOG_INFO("[HWMenu] Scope NVG enable all: " << result);
+                }
+            });
+
+            items.push_back({"Disable All",
+                []() -> std::string { return ""; },
+                []() {
+                    std::string result = Mod::ScopeNVGSubsystem::Get().DisableAll();
+                    LOG_INFO("[HWMenu] Scope NVG disable all: " << result);
+                }
+            });
+
+            // Auto-scan toggle
+            items.push_back({"Auto Scan",
+                []() -> std::string { return Mod::ScopeNVGSubsystem::Get().IsAutoScanEnabled() ? "ON" : "OFF"; },
+                []() {
+                    auto& s = Mod::ScopeNVGSubsystem::Get();
+                    s.SetAutoScan(!s.IsAutoScanEnabled());
+                }
+            });
+
+            // Dynamically list discovered scopes
+            const auto& scopes = sn.GetScopes();
+            for (int i = 0; i < static_cast<int>(scopes.size()); ++i)
+            {
+                int scopeIdx = i;
+                std::string label = scopes[i].name.empty()
+                    ? ("Scope #" + std::to_string(i))
+                    : scopes[i].name;
+
+                items.push_back({label,
+                    [scopeIdx]() -> std::string {
+                        const auto& s = Mod::ScopeNVGSubsystem::Get().GetScopes();
+                        if (scopeIdx >= 0 && scopeIdx < static_cast<int>(s.size()))
+                            return s[scopeIdx].nvgEnabled ? "NVG ON" : "NVG OFF";
+                        return "?";
+                    },
+                    [scopeIdx]() {
+                        std::string result = Mod::ScopeNVGSubsystem::Get().ToggleScopeNVG(scopeIdx);
+                        LOG_INFO("[HWMenu] Scope toggle " << scopeIdx << ": " << result);
+                    }
+                });
+            }
+        });
+
+        LOG_INFO("[HWMenu] Scope NVG page built");
     }
 
     // =========================================================================

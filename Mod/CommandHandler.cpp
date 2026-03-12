@@ -27,6 +27,7 @@ Solution: add short aliases and a one-shot "vr_diag" command to enable/disable t
 #include "HookManager.hpp"
 #include "FriendSubsystem.hpp"
 #include "NVGSubsystem.hpp"
+#include "ScopeNVGSubsystem.hpp"
 
 namespace Mod
 {
@@ -1209,6 +1210,82 @@ namespace Mod
             char buf[96];
             snprintf(buf, sizeof(buf), "AutoFOV: %s (computed=%.1f)", enabled ? "ON" : "OFF", nvg.ComputeAutoFOV());
             return buf; });
+
+        // ---------------------------------------------------------------
+        // Weapon Scope NVG commands
+        // ---------------------------------------------------------------
+
+        // scope_nvg_scan - Discover scopes on the player
+        Register("scope_nvg_scan", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)args;
+            return Mod::ScopeNVGSubsystem::Get().ScanScopes(world); });
+
+        // scope_nvg_toggle <index> - Toggle NVG on a specific scope
+        Register("scope_nvg_toggle", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            if (args.empty())
+                return "Usage: scope_nvg_toggle <index>\n" + Mod::ScopeNVGSubsystem::Get().GetStatusReport();
+            int idx = 0;
+            try { idx = std::stoi(args[0]); }
+            catch (...) { return "Invalid index: " + args[0]; }
+            return Mod::ScopeNVGSubsystem::Get().ToggleScopeNVG(idx); });
+
+        // scope_nvg_on - Enable NVG on ALL scopes
+        Register("scope_nvg_on", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::ScopeNVGSubsystem::Get().EnableAll(); });
+
+        // scope_nvg_off - Disable NVG on ALL scopes
+        Register("scope_nvg_off", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::ScopeNVGSubsystem::Get().DisableAll(); });
+
+        // scope_nvg_status - Report all scope NVG state
+        Register("scope_nvg_status", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world; (void)args;
+            return Mod::ScopeNVGSubsystem::Get().GetStatusReport(); });
+
+        // scope_nvg_autoscan [0|1] - Toggle automatic scope re-scanning
+        Register("scope_nvg_autoscan", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& sn = Mod::ScopeNVGSubsystem::Get();
+            if (args.empty())
+                return std::string("Auto-scan: ") + (sn.IsAutoScanEnabled() ? "ON" : "OFF");
+            bool on = (args[0] == "1" || args[0] == "on" || args[0] == "true");
+            sn.SetAutoScan(on);
+            return std::string("Auto-scan: ") + (on ? "ON" : "OFF"); });
+
+        // scope_nvg_gain <value> - Set green gain intensity
+        Register("scope_nvg_gain", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& sn = Mod::ScopeNVGSubsystem::Get();
+            if (args.empty())
+                return "Usage: scope_nvg_gain <0.1-5.0>\nCurrent: " + std::to_string(sn.GetGreenGain());
+            float val = 1.5f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+            sn.SetGreenGain(val);
+            return "Scope NVG green gain set to " + std::to_string(val); });
+
+        // scope_nvg_exposure <value> - Set exposure bias
+        Register("scope_nvg_exposure", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string
+                 {
+            (void)world;
+            auto& sn = Mod::ScopeNVGSubsystem::Get();
+            if (args.empty())
+                return "Usage: scope_nvg_exposure <-5.0-10.0>\nCurrent: " + std::to_string(sn.GetExposureBias());
+            float val = 1.5f;
+            try { val = std::stof(args[0]); }
+            catch (...) { return "Invalid value: " + args[0]; }
+            sn.SetExposureBias(val);
+            return "Scope NVG exposure bias set to " + std::to_string(val); });
 
         // Access level: for testing content gated behind access levels without needing to meet requirements in-game.
         Register("access", [](SDK::UWorld *world, const std::vector<std::string> &args) -> std::string

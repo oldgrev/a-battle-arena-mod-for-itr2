@@ -319,7 +319,7 @@ namespace PortableWidget
 
         // Pivot and offset for hand-mounted display
         handWidget_->SetPivot(0.5f, 0.95f);
-        float forwardOffset = static_cast<float>(itemCount) * 0.50f;
+        float forwardOffset = static_cast<float>(itemCount) * 0.10f;
         handWidget_->SetForwardOffset(forwardOffset);
 
         // Ensure visible and request redraw

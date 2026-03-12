@@ -119,6 +119,7 @@ namespace PortableWidget
         void BuildNVGPage();
         void BuildNVGTuningPage();
         void BuildNVGLensPage();
+        void BuildScopeNVGPage();
 
         // Command handlers
         std::string HandleTestCommand(SDK::UWorld* world, const std::vector<std::string>& args);

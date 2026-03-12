@@ -30,6 +30,7 @@ SetUnlimitedAmmo/SetGodMode/etc.
 #include "ModTuning.hpp"
 #include "GameContext.hpp"  // for world access when interacting with subsystems
 #include "NVGSubsystem.hpp"
+#include "ScopeNVGSubsystem.hpp"
 
 // forward declare cheat subsystem type for convenience
 using CheatSubsystem_t = SDK::URadiusCheatSubsystem;
@@ -626,6 +627,9 @@ namespace Mod
 
         // Night vision goggle subsystem update
         NVGSubsystem::Get().Update(world);
+
+        // Weapon scope NVG subsystem update
+        ScopeNVGSubsystem::Get().Update(world);
     }
 
     // body dilation doesn't even work, arms and the player weapon move so slow which is crap in vr. to do
